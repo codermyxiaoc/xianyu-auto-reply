@@ -1,0 +1,64 @@
+.native-select-control {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+.native-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  min-width: 0;
+  text-align: left;
+  cursor: pointer;
+  background-image: none !important;
+  transition: border-color .15s, box-shadow .15s, background-color .15s;
+}
+.native-select-trigger:not(:disabled):hover { border-color: #cbd5e1; }
+.native-select-trigger:focus-visible,
+.native-select-trigger[data-open] {
+  outline: none !important;
+  border-color: #d1d5db !important;
+  box-shadow: 0 0 0 2px rgb(209 213 219 / .55) !important;
+}
+.native-select-trigger[aria-invalid="true"] { border-color: #ef4444 !important; }
+.native-select-menu {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #374151;
+  box-shadow: 0 6px 18px rgb(15 23 42 / .1);
+  scrollbar-width: thin;
+}
+.native-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 38px;
+  padding: 9px 16px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.native-select-option[data-active], .native-select-option[data-selected] { background: #f8fafc; }
+.native-select-option[data-selected] { color: #0ea5e9; }
+.native-select-option[aria-disabled="true"] { color: #94a3b8; cursor: not-allowed; }
+.dark .native-select-trigger:focus-visible, .dark .native-select-trigger[data-open] {
+  border-color: #64748b !important;
+  box-shadow: 0 0 0 2px rgb(100 116 139 / .3) !important;
+}
+.dark .native-select-menu { border-color: #475569; background: #1e293b; color: #e2e8f0; }
+.dark .native-select-option[data-active], .dark .native-select-option[data-selected] { background: #334155; }
+.dark .native-select-option[data-selected] { color: #38bdf8; }
+.dark .native-select-option[aria-disabled="true"] { color: #64748b; }
