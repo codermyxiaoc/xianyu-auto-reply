@@ -17,6 +17,7 @@ import asyncio
 import base64
 import json
 import time
+import uuid
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, Response
@@ -35,6 +36,7 @@ from common.schemas.common import ApiResponse
 from common.utils.auth_scope import is_admin_user
 from common.utils.xianyu_utils import trans_cookies
 from common.utils.xianyu_message_parser import load_content_json, interpret_content
+from common.utils.xianyu_item_card import parse_item_card
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -227,11 +229,14 @@ async def connect_account(
 async def disconnect_account(
     account_id: str,
     current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """
     断开指定账号的IM WebSocket
     """
     try:
+        if not await _get_owned_chat_account(account_id, current_user, db):
+            return ApiResponse(success=False, message="账号不存在或无权操作")
         manager = get_im_session_manager()
         await manager.disconnect(account_id)
         return ApiResponse(success=True, message="已断开连接")
@@ -540,6 +545,7 @@ async def send_message(
     account_id: str,
     req: SendMessageRequest,
     current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db_session),
 ):
     """
     发送文本消息
@@ -549,6 +555,8 @@ async def send_message(
         req: 包含 cid（会话ID）、toUserId（对方用户ID）、text（消息内容）
     """
     try:
+        if not await _get_owned_chat_account(account_id, current_user, db):
+            return ApiResponse(success=False, message="账号不存在或无权操作")
         manager = get_im_session_manager()
         client = manager.clients.get(account_id)
         if not client or not client.is_connected:
@@ -557,6 +565,7 @@ async def send_message(
         if not req.text.strip():
             return ApiResponse(success=False, message="消息内容不能为空")
 
+        sent_at = int(time.time() * 1000)
         send_result = await client.send_text_message(
             cid=req.cid,
             to_user_id=req.toUserId,
@@ -565,10 +574,17 @@ async def send_message(
         logger.info(
             f"【{account_id}】发送消息到 {req.toUserId}: {req.text[:50]}"
         )
+        message_id = str(send_result.get("messageId", "") or "")
+        client_message_id = str(send_result.get("uuid") or uuid.uuid4().hex)
+        await manager.broadcast_message(account_id, req.cid, {
+            "messageId": message_id, "senderId": client.myid, "senderName": "",
+            "isSelf": True, "type": "text", "text": req.text, "images": [], "time": sent_at,
+            "clientMessageId": client_message_id, **({"failed": False} if not message_id else {}),
+        })
         return ApiResponse(
             success=True,
             message="发送成功",
-            data={"messageId": send_result.get("messageId", "")},
+            data={"messageId": message_id, "time": sent_at, "clientMessageId": client_message_id},
         )
 
     except Exception as e:
@@ -867,6 +883,7 @@ def _parse_message(model: dict, myid: str) -> dict | None:
         msg_type = "text"
         msg_text = ""
         msg_images = []
+        item_card = None
 
         if custom_data:
             # 文本/图片/语音等通用内容解析统一走公共模块（HTTP 历史消息载荷为 base64）；
@@ -876,6 +893,7 @@ def _parse_message(model: dict, myid: str) -> dict | None:
             decoded = load_content_json(custom_data)
             if decoded is not None:
                 msg_text, msg_images, msg_type = interpret_content(decoded)
+                item_card = parse_item_card(decoded)
                 if msg_type == "image" and not msg_images:
                     # 图片但未取到 URL，占位提示
                     msg_text = "[图片]"
@@ -912,6 +930,7 @@ def _parse_message(model: dict, myid: str) -> dict | None:
             "text": msg_text,
             "images": msg_images,
             "time": msg_time,
+            **({"itemCard": item_card} if item_card is not None else {}),
         }
     except Exception as e:
         logger.warning(f"解析消息失败: {e}")

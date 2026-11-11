@@ -1,4 +1,4 @@
-"""管理员门票配置、买家实名登记与绑定订单的链接发送。"""
+"""按订单归属管理门票配置、买家实名登记与绑定订单的链接发送。"""
 from __future__ import annotations
 
 from datetime import date
@@ -37,6 +37,19 @@ CANONICAL_TICKET_TYPE_NAMES = tuple(
     for person in ("成人", "老人", "儿童")
     for days in ("1", "1.5", "2")
 )
+
+
+def ticket_order_scope(owner_id: int | None) -> list:
+    """普通用户须同时拥有订单及对应闲鱼账号；管理员使用不受限范围。"""
+    if owner_id is None:
+        return []
+    return [
+        XYOrder.owner_id == owner_id,
+        select(XYAccount.id).where(
+            XYAccount.account_id == XYOrder.account_id,
+            XYAccount.owner_id == owner_id,
+        ).exists(),
+    ]
 
 
 def require_paid_order(order: XYOrder | None, *, public: bool = False) -> XYOrder:
@@ -117,8 +130,9 @@ def public_link_base(value: str) -> tuple[str, bool]:
 
 
 class TicketRegistrationService:
-    def __init__(self, session: AsyncSession, frontend_origin: str = "http://127.0.0.1:9000"):
+    def __init__(self, session: AsyncSession, frontend_origin: str = "http://127.0.0.1:9000", *, owner_id: int | None = None):
         self.session = session
+        self.owner_id = owner_id
         self.settings = get_settings()
         self.frontend_origin = frontend_origin
         self._cipher: Fernet | None = None
@@ -139,10 +153,13 @@ class TicketRegistrationService:
             raise TicketRegistrationError("实名登记数据无法读取，请联系管理员", 503) from None
 
     async def _order(self, order_id: int, *, lock: bool = False, public: bool = False) -> XYOrder:
-        stmt = select(XYOrder).where(XYOrder.id == order_id).execution_options(populate_existing=True)
+        stmt = select(XYOrder).where(XYOrder.id == order_id, *ticket_order_scope(self.owner_id)).execution_options(populate_existing=True)
         if lock:
             stmt = stmt.with_for_update()
-        return require_paid_order((await self.session.execute(stmt)).scalar_one_or_none(), public=public)
+        order = (await self.session.execute(stmt)).scalar_one_or_none()
+        if order is None and self.owner_id is not None:
+            raise TicketRegistrationError("订单不存在或无权操作", 403)
+        return require_paid_order(order, public=public)
 
     async def _config(self, order_id: int, *, lock: bool = False) -> TicketRegistration | None:
         stmt = select(TicketRegistration).where(TicketRegistration.order_id == order_id).execution_options(populate_existing=True)
@@ -188,7 +205,7 @@ class TicketRegistrationService:
             raise TicketRegistrationError("实名登记数据无法读取，请联系管理员", 503) from None
 
     async def contact_phone(self, config: TicketRegistration) -> str | None:
-        """读取整单联系电话，仅供管理员视图、导出及公开掩码使用。"""
+        """读取整单联系电话，仅供已授权订单视图、导出及公开掩码使用。"""
         if not config.phone_ciphertext:
             return None
         return await self._decrypt(config.phone_ciphertext)

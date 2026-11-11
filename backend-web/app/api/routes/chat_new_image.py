@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
+import uuid
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from loguru import logger
@@ -117,6 +119,7 @@ async def send_image(
             return ApiResponse(success=False, message="图片上传失败，请检查账号Cookie是否有效或稍后重试")
 
         # 5. 发送图片消息
+        sent_at = int(time.time() * 1000)
         send_result = await client.send_image_message(
             cid=cid,
             to_user_id=toUserId,
@@ -125,11 +128,20 @@ async def send_image(
             height=height,
         )
         logger.info(f"【{account_id}】发送图片消息到 {toUserId}: {cdn_url}")
+        message_id = str(send_result.get("messageId", "") or "")
+        client_message_id = str(send_result.get("uuid") or uuid.uuid4().hex)
+        await manager.broadcast_message(account_id, cid, {
+            "messageId": message_id, "senderId": client.myid, "senderName": "",
+            "isSelf": True, "type": "image", "text": "", "images": [cdn_url], "time": sent_at,
+            "clientMessageId": client_message_id, **({"failed": False} if not message_id else {}),
+        })
         return ApiResponse(
             success=True,
             message="发送成功",
             data={
-                "messageId": send_result.get("messageId", ""),
+                "messageId": message_id,
+                "time": sent_at,
+                "clientMessageId": client_message_id,
                 "imageUrl": cdn_url,
             },
         )

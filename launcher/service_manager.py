@@ -341,7 +341,10 @@ class ServiceManager:
         def _serve():
             """在子线程中运行静态文件服务器"""
             try:
-                handler = functools.partial(FrontendHandler, dist_dir=dist_dir_str)
+                handler = functools.partial(
+                    FrontendHandler, dist_dir=dist_dir_str,
+                    backend_url="http://127.0.0.1:8089",
+                )
                 self._frontend_server = http.server.ThreadingHTTPServer(
                     ("0.0.0.0", port), handler
                 )

@@ -28,8 +28,6 @@ const Accounts = React.lazy(() => import('@/pages/accounts/Accounts').then(m => 
 const Items = React.lazy(() => import('@/pages/items/Items').then(m => ({ default: m.Items })))
 const Orders = React.lazy(() => import('@/pages/orders/Orders').then(m => ({ default: m.Orders })))
 const Keywords = React.lazy(() => import('@/pages/keywords/Keywords').then(m => ({ default: m.Keywords })))
-const About = React.lazy(() => import('@/pages/about/About').then(m => ({ default: m.About })))
-const PublicAbout = React.lazy(() => import('@/pages/about/PublicAbout').then(m => ({ default: m.PublicAbout })))
 const Disclaimer = React.lazy(() => import('@/pages/disclaimer/Disclaimer').then(m => ({ default: m.Disclaimer })))
 const NotificationChannels = React.lazy(() => import('@/pages/notifications/NotificationChannels').then(m => ({ default: m.NotificationChannels })))
 const MessageNotifications = React.lazy(() => import('@/pages/notifications/MessageNotifications').then(m => ({ default: m.MessageNotifications })))
@@ -330,7 +328,8 @@ function App() {
           <Route path="/renew-activation" element={<RenewActivation />} />
           <Route path="/get-local-version" element={<GetLocalVersion />} />
           <Route path="/get-source-code" element={<GetSourceCode />} />
-          <Route path="/about-public" element={<PublicAbout />} />
+          <Route path="/about-public" element={<Navigate to="/" replace />} />
+          <Route path="/about" element={<Navigate to="/" replace />} />
           {/* 兼职端扫码页面：无需登录，公开访问 */}
           <Route path="/shared-scan-page" element={<SharedScanPage />} />
           {/* 同意后发货提货页：无需登录，公开访问 */}
@@ -395,7 +394,6 @@ function App() {
             {/* 共享多人扫码登录管理端 */}
             <Route path="shared-scan" element={<Navigate to="/accounts/shared-scan" replace />} />
             <Route path="disclaimer" element={<Disclaimer />} />
-            <Route path="about" element={<About />} />
             <Route path="tutorial" element={<Tutorial />} />
 
             {/* Admin routes */}

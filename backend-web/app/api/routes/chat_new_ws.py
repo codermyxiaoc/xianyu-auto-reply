@@ -139,6 +139,12 @@ async def chat_new_websocket(
 
     manager = get_im_session_manager()
     client = manager.clients.get(account_id)
+    if client and not client.is_connected:
+        try:
+            client = await manager.reconnect_existing(account_id)
+        except Exception as exc:
+            logger.warning("【{}】恢复在线聊天订阅失败: {}", account_id, type(exc).__name__)
+            client = None
     if not client or not client.is_connected:
         logger.warning(f"【{account_id}】IM 客户端未连接，拒绝注册前端实时消息订阅")
         await websocket.close(code=WS_CLOSE_IM_OFFLINE)

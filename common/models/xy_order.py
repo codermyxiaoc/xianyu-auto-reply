@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, JSON, Numeric, String
+from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, JSON, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.db.base_class import Base, TimestampMixin
@@ -34,6 +34,8 @@ class XYOrder(TimestampMixin, Base):
     owner_id: Mapped[int] = mapped_column(BigInteger, index=True, comment="所属用户ID")
     order_no: Mapped[str] = mapped_column(String(64), nullable=False, comment="订单号")
     status: Mapped[str] = mapped_column(String(32), nullable=False, comment="订单状态")
+    # 仅供卖家内部使用，平台订单同步不得写入或覆盖此字段。
+    remark: Mapped[str | None] = mapped_column(Text, nullable=True, comment="订单内部备注")
     buyer_nick: Mapped[str | None] = mapped_column(String(120), comment="买家昵称")
     buyer_fish_nick: Mapped[str | None] = mapped_column(String(120), comment="买家闲鱼昵称（明文）")
     buyer_id: Mapped[str | None] = mapped_column(String(64), comment="买家ID")

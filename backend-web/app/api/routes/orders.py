@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel
 from loguru import logger
 
 from app.api import deps
 from common.models.user import User
 from common.schemas.common import ApiResponse
-from common.schemas.order import OrderOut, TicketCollectionStatus, TicketExportStatus
+from common.schemas.order import OrderOut, OrderRemarkRequest, TicketCollectionStatus, TicketExportStatus
 from common.utils.auth_scope import resolve_owner_scope
 from app.services.account_service import AccountService
 from app.services.order_service import OrderService
@@ -143,6 +143,7 @@ async def list_orders(
                 quantity=order.quantity or 0,
                 amount=_format_decimal(order.amount),
                 status=(order.status or "unknown").lower(),
+                remark=order.remark or "",
                 is_bargain=order.is_bargain or False,
                 is_rated=order.is_rated or False,
                 is_red_flower=order.is_red_flower or False,
@@ -244,6 +245,22 @@ async def fetch_xianyu_orders(
     }
 
 
+@router.put("/{order_id}/remark")
+async def save_order_remark(
+    payload: OrderRemarkRequest,
+    order_id: str = Path(pattern=r"^[1-9][0-9]{0,18}$", max_length=19),
+    current_user: User = Depends(deps.get_current_active_user),
+    order_service: OrderService = Depends(deps.get_order_service),
+):
+    """编辑订单内部备注，不受付款状态限制，也不向买家公开。"""
+    if int(order_id) > 9223372036854775807:
+        raise HTTPException(status_code=422, detail="订单 ID 不正确")
+    owner_id, _ = resolve_owner_scope(current_user)
+    if not await order_service.save_remark(int(order_id), payload.remark, owner_id=owner_id):
+        raise HTTPException(status_code=404, detail="订单不存在或无权编辑")
+    return ApiResponse(success=True, data={"order_id": order_id, "remark": payload.remark})
+
+
 @router.get("/{order_no}")
 async def get_order_detail(
     order_no: str,
@@ -313,6 +330,7 @@ async def get_order_detail(
             "quantity": order.quantity or 0,
             "amount": _format_decimal(order.amount),
             "status": (order.status or "unknown").lower(),
+            "remark": order.remark or "",
             "is_bargain": order.is_bargain or False,
             "is_rated": order.is_rated or False,
             "is_red_flower": order.is_red_flower or False,

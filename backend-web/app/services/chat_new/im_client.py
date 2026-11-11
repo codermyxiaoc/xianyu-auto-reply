@@ -15,6 +15,7 @@ import aiohttp
 from loguru import logger
 
 from common.utils.xianyu_official_accounts import ensure_xianyu_message_recipient
+from common.utils.xianyu_item_card import normalize_item_card
 from common.utils.xianyu_utils import generate_device_id, generate_mid, generate_uuid, trans_cookies
 from .im_token import (
     CAPTCHA_KEYWORDS as CAPTCHA_KEYWORDS,
@@ -444,6 +445,75 @@ class GoofishImClient(ImTokenMixin, ImTransportMixin):
             if isinstance(raw_message_id, str):
                 message_id = raw_message_id
         return {"response": response, "messageId": message_id, "uuid": message_uuid}
+
+    async def send_item_message(
+        self, cid: str, to_user_id: str, item_card: dict,
+    ) -> Dict[str, Any]:
+        """发送 contentType=7 原生商品卡片，发送内容由本账号商品目录提供。"""
+        ensure_xianyu_message_recipient(to_user_id)
+        card = normalize_item_card(item_card)
+        if card is None or not all(card[key] for key in ("title", "price", "mainPic")):
+            raise ValueError("商品编号、标题、价格和图片必须完整有效")
+        full_cid = cid if "@" in cid else f"{cid}@goofish"
+        full_to = to_user_id if "@" in to_user_id else f"{to_user_id}@goofish"
+        payload = {
+            "atUsers": [], "contentType": 7,
+            "itemCard": {
+                "item": {"itemId": int(card["itemId"]), "mainPic": card["mainPic"],
+                         "price": card["price"], "title": card["title"]},
+                "itemTip": "我想要",
+            },
+        }
+        data_b64 = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("utf-8")
+        mid, message_uuid = generate_mid(), generate_uuid()
+        msg = {
+            "lwp": "/r/MessageSend/sendByReceiverScope", "headers": {"mid": mid},
+            "body": [{
+                "uuid": message_uuid, "cid": full_cid, "conversationType": 1,
+                "content": {"contentType": 101, "custom": {"type": 1, "data": data_b64}},
+                "redPointPolicy": 0, "extension": {"extJson": "{}"},
+                "ctx": {"appVersion": "1.0", "platform": "web"}, "mtags": {}, "msgReadStatusSetting": 1,
+            }, {"actualReceivers": [full_to, f"{self.myid}@goofish"]}],
+        }
+        # 超时不重发；Token失效只恢复连接，由用户决定是否再次发送。
+        response = await self._send_and_wait_with_retry(lambda: (mid, msg), retry_after_reconnect=False)
+        self._raise_if_send_rejected(response)
+        if response.get("code", 200) not in (200, "200"):
+            raise RuntimeError("闲鱼未确认商品卡片发送成功")
+        body = response.get("body", {})
+        message_id = ""
+        if isinstance(body, dict):
+            raw_message_id = body.get("messageId") or body.get("1")
+            if isinstance(raw_message_id, dict):
+                raw_message_id = raw_message_id.get("messageId") or raw_message_id.get("1")
+            if isinstance(raw_message_id, str):
+                message_id = raw_message_id
+        return {"response": response, "messageId": message_id, "uuid": message_uuid}
+
+    async def mark_read(self, cid: str, message_ids: list[str], last_message_id: str) -> None:
+        """上报消息已读，再清除对应会话截至该消息的红点，均须收到确认。
+
+        协议依据：闲鱼官方公开 p_im-index.js (xy-site/0.0.181)，
+        MessageStatus/read、Conversation/clearRedPoint 及 updateMessageToRead。
+        https://g.alicdn.com/idle-pc/xy-site/0.0.181/js/p_im-index.js
+        """
+        unique_ids = list(dict.fromkeys(message_ids))
+        if not unique_ids or len(unique_ids) > 100 or last_message_id not in unique_ids:
+            raise ValueError("已读消息与会话边界无效")
+        full_cid = cid if cid.endswith("@goofish") else f"{cid}@goofish"
+        for operation, body in (
+            ("/r/MessageStatus/read", [unique_ids]),
+            ("/r/Conversation/clearRedPoint", [[{"messageId": last_message_id, "cid": full_cid}]]),
+        ):
+            def build_request():
+                mid = generate_mid()
+                return mid, {"lwp": operation, "headers": {"mid": mid}, "body": body}
+
+            # 重复上报同一已读边界是幂等的；Token失效后允许恢复连接并重试。
+            response = await self._send_and_wait_with_retry(build_request, retry_after_reconnect=True)
+            self._raise_if_send_rejected(response)
+            if not isinstance(response, dict) or response.get("code") != 200:
+                raise RuntimeError("闲鱼未确认已读状态，请稍后重试")
 
     async def recall_message(self, message_id: str) -> Dict[str, Any]:
         """通过闲鱼官方 IM 协议撤回一条消息"""

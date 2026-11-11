@@ -29,7 +29,7 @@ import test_ticket_registration_integration as fixtures
 from app.api import deps
 from app.api.routes import ticket_registration_export as export_routes
 from app.services.ticket_registration_service import TicketRegistrationService
-from app.services.ticket_registration_export_service import build_ticket_workbook
+from app.services.ticket_registration_export_service import build_ticket_workbook, export_ticket_registrations
 from common.models.ticket_registration import TicketRegistration
 from common.models.user import User, UserRole, UserStatus
 from common.models.xy_order import XYOrder
@@ -37,7 +37,7 @@ from common.schemas.ticket_registration import TicketExportRequest
 from common.services.order_service import OrderService
 
 
-HEADERS = ("订单号", "日期", "姓名", "身份证", "票种", "用户名", "手机号")
+HEADERS = ("订单号", "日期", "姓名", "身份证", "票种", "用户名", "手机号", "备注")
 PHONE = "13800138000"
 
 
@@ -76,7 +76,7 @@ class TicketRegistrationExportTests(unittest.IsolatedAsyncioTestCase):
                 values = dict(owner_id=1, account_id="synthetic-account", order_no="SYNTH-" + uuid.uuid4().hex,
                     status="pending_ship", buyer_id="synthetic-buyer", buyer_fish_nick="合成买家", buyer_nick="绝不能使用的历史昵称",
                     item_id="synthetic-item", quantity=len(names), amount="100.00", currency="CNY", is_bargain=False,
-                    is_rated=False, placed_at=datetime(2026, 10, 15, 12, 0, 0))
+                    is_rated=False, remark=None, placed_at=datetime(2026, 10, 15, 12, 0, 0))
                 values.update({key: value for key, value in spec.items() if key in values or key == "delivery_method"})
                 order = XYOrder(**values)
                 session.add(order)
@@ -132,17 +132,17 @@ class TicketRegistrationExportTests(unittest.IsolatedAsyncioTestCase):
     async def test_multiple_visitors_phone_blanks_native_dates_and_text_safety(self):
         long_order = "5127851592171166512"
         identifiers = await self.seed([
-            {"order_no": long_order, "names": ["合成成人", "合成儿童"], "buyer_fish_nick": "  合成昵称  "},
+            {"order_no": long_order, "names": ["合成成人", "合成儿童"], "buyer_fish_nick": "  合成昵称  ", "remark": "内部备注\n两位游客一起取票"},
             {"order_no": "SYNTH-DRAFT", "submitted": False, "buyer_fish_nick": "  ", "buyer_id": "0000123456789012345"},
             {"order_no": "SYNTH-LEGACY", "phone": None, "buyer_fish_nick": None, "buyer_id": "legacy-buyer"},
-            {"order_no": "SYNTH-FORMULA", "buyer_fish_nick": "=1+1", "ticket_type_name": "=HYPERLINK(\"https://example.test\",\"合成票种\")"},
+            {"order_no": "SYNTH-FORMULA", "buyer_fish_nick": "=1+1", "ticket_type_name": "=HYPERLINK(\"https://example.test\",\"合成票种\")", "remark": "=1+1\n合成内部备注"},
             {"order_no": "SYNTH-NO-CONFIG", "configured": False},
         ])
         response, workbook = await self.workbook(identifiers.values())
         try:
             sheet = workbook.active
             self.assertEqual(tuple(cell.value for cell in sheet[1]), HEADERS)
-            self.assertEqual(sheet.max_column, 7)
+            self.assertEqual(sheet.max_column, 8)
             self.assertEqual(sheet.max_row, 5)
             rows = list(sheet.iter_rows(min_row=2))
             by_order = {}
@@ -151,7 +151,7 @@ class TicketRegistrationExportTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(row[1].value, datetime)
                 self.assertEqual(row[1].value.date(), date.fromisoformat(self.visit_date))
                 self.assertEqual(row[1].data_type, "d")
-                for column in (0, 2, 3, 4, 5, 6):
+                for column in (0, 2, 3, 4, 5, 6, 7):
                     self.assertEqual(row[column].number_format, "@")
                     self.assertNotEqual(row[column].data_type, "f")
                 self.assertNotIn("绝不能使用的历史昵称", [cell.value for cell in row])
@@ -159,6 +159,8 @@ class TicketRegistrationExportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(shared), 2)
             self.assertEqual({row[6].value for row in shared}, {PHONE})
             self.assertEqual({row[5].value for row in shared}, {"合成昵称"})
+            self.assertEqual({row[7].value for row in shared}, {"内部备注\n两位游客一起取票"})
+            self.assertTrue(all(row[7].alignment.wrap_text for row in shared))
             self.assertEqual(shared[0][0].data_type, "s")
             self.assertEqual(shared[0][0].value, long_order)
             for row in shared:
@@ -169,11 +171,14 @@ class TicketRegistrationExportTests(unittest.IsolatedAsyncioTestCase):
             legacy = by_order["SYNTH-LEGACY"][0]
             self.assertIn(legacy[6].value, (None, ""))
             self.assertEqual(legacy[5].value, "legacy-buyer")
+            self.assertIn(legacy[7].value, (None, ""))
             formula = by_order["SYNTH-FORMULA"][0]
             self.assertEqual(formula[5].value, "=1+1")
             self.assertEqual(formula[5].data_type, "s")
             self.assertTrue(formula[4].value.startswith("=HYPERLINK("))
             self.assertEqual(formula[4].data_type, "s")
+            self.assertEqual(formula[7].value, "=1+1\n合成内部备注")
+            self.assertEqual(formula[7].data_type, "s")
         finally:
             workbook.close()
 
@@ -265,6 +270,67 @@ class TicketRegistrationExportTests(unittest.IsolatedAsyncioTestCase):
         async with self.sessions() as session:
             registration = (await session.execute(select(TicketRegistration))).scalar_one()
             self.assertIsNone(registration.exported_at)
+
+    async def test_admin_export_serializes_concurrent_remark_save_then_remains_unexported(self):
+        identifiers = await self.seed([{"order_no": "SYNTH-REMARK-RACE", "remark": "导出时原备注"}])
+        order_id = identifiers["SYNTH-REMARK-RACE"]
+        loop = asyncio.get_running_loop()
+        pending = []
+
+        async def edit_remark():
+            async with self.sessions() as session:
+                self.assertTrue(await OrderService(session).save_remark(order_id, "保存后的新备注", owner_id=None))
+
+        async def start_waiting_edit():
+            task = asyncio.create_task(edit_remark())
+            pending.append(task)
+            await asyncio.sleep(0.1)
+            self.assertFalse(task.done(), "导出生成中必须持有订单锁，备注保存应等待导出事务完成")
+
+        def build_while_editing(rows):
+            asyncio.run_coroutine_threadsafe(start_waiting_edit(), loop).result(timeout=10)
+            return build_ticket_workbook(rows)
+
+        try:
+            with patch('app.services.ticket_registration_export_service.build_ticket_workbook', side_effect=build_while_editing):
+                response = await self.request_export([order_id])
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.content.startswith(b"PK"), response.text[:300])
+        finally:
+            if pending:
+                await asyncio.wait_for(asyncio.gather(*pending), timeout=15)
+        workbook = load_workbook(BytesIO(response.content))
+        try:
+            self.assertEqual(workbook.active.cell(2, 8).value, "导出时原备注")
+        finally:
+            workbook.close()
+        async with self.sessions() as session:
+            order = (await session.execute(select(XYOrder).where(XYOrder.id == order_id))).scalar_one()
+            registration = (await session.execute(select(TicketRegistration).where(TicketRegistration.order_id == order_id))).scalar_one()
+            self.assertEqual(order.remark, "保存后的新备注")
+            self.assertIsNone(registration.exported_at)
+            self.assertEqual(registration.version, 2)
+            self.assertIsNotNone(registration.submitted_at)
+
+    async def test_export_uses_current_locked_remark_not_older_repeatable_read_snapshot(self):
+        identifiers = await self.seed([{"order_no": "SYNTH-REMARK-SNAPSHOT", "remark": "旧备注"}])
+        order_id = identifiers["SYNTH-REMARK-SNAPSHOT"]
+        async with self.sessions() as exporter:
+            # 模拟认证或其他先前查询已经建立 MySQL REPEATABLE READ 快照。
+            old = (await exporter.execute(select(XYOrder).where(XYOrder.id == order_id))).scalar_one()
+            self.assertEqual(old.remark, "旧备注")
+            async with self.sessions() as writer:
+                self.assertTrue(await OrderService(writer).save_remark(order_id, "当前新备注", owner_id=None))
+            content = await export_ticket_registrations(exporter, order_ids=[order_id])
+        workbook = load_workbook(BytesIO(content))
+        try:
+            self.assertEqual(workbook.active.cell(2, 8).value, "当前新备注")
+        finally:
+            workbook.close()
+        async with self.sessions() as session:
+            registration = (await session.execute(select(TicketRegistration).where(TicketRegistration.order_id == order_id))).scalar_one()
+            self.assertIsNotNone(registration.exported_at)
+            self.assertEqual(registration.version, 2)
 
     async def test_concurrent_configuration_change_cancels_stale_export(self):
         identifiers = await self.seed([{"order_no": "SYNTH-CONCURRENT-EXPORT"}, {"order_no": "SYNTH-UNMODIFIED"}])

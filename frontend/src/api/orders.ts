@@ -1,4 +1,4 @@
-import { get, del, post } from '@/utils/request'
+import { get, del, post, put } from '@/utils/request'
 import type { Order, ApiResponse } from '@/types'
 
 const ORDER_PREFIX = '/api/v1/orders'
@@ -105,6 +105,16 @@ export const getOrders = (
 // 获取订单详情
 export const getOrderDetail = (orderNo: string, refresh = false): Promise<{ success: boolean; data: OrderDetail }> => {
   return get(`${ORDER_PREFIX}/${orderNo}?refresh=${refresh}`)
+}
+
+export interface OrderRemarkResult {
+  order_id: string
+  remark: string
+}
+
+/** 使用数据库订单 ID 的原始字符串，避免长整数精度丢失。 */
+export const updateOrderRemark = (orderId: string, remark: string): Promise<ApiResponse<OrderRemarkResult>> => {
+  return put(`${ORDER_PREFIX}/${encodeURIComponent(orderId)}/remark`, { remark })
 }
 
 // 删除订单

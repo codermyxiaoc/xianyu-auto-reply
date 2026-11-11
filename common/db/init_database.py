@@ -34,6 +34,7 @@ from common.db.payment_schema import ensure_payment_schema
 from common.db.item_query_indexes import ensure_item_query_indexes
 from common.db.api_keyword_schema import ensure_api_keyword_schema
 from common.db.ticket_registration_schema import ensure_ticket_registration_schema
+from common.db.order_remark_schema import ensure_order_remark_schema
 from common.db.session import async_engine, async_session_maker
 from common.utils.time_utils import get_beijing_now_naive
 from common.utils.security import generate_secret_key, get_password_hash
@@ -667,6 +668,7 @@ class DatabaseInitializer:
                 owner_id BIGINT NOT NULL COMMENT '所属用户ID',
                 order_no VARCHAR(64) NOT NULL COMMENT '订单号',
                 status VARCHAR(32) NOT NULL COMMENT '订单状态',
+                remark TEXT NULL COMMENT '订单内部备注',
                 buyer_nick VARCHAR(120) COMMENT '买家昵称',
                 buyer_id VARCHAR(64) COMMENT '买家ID',
                 chat_id VARCHAR(64) COMMENT '聊天会话ID',
@@ -2299,6 +2301,10 @@ class DatabaseInitializer:
 
                     # 1.1 初始化所有枚举数据字典
                     await self.init_data_dictionaries()
+
+                    # 内部备注只补缺失列，不覆盖任何历史订单业务数据。
+                    async with ddl_connection() as conn:
+                        await ensure_order_remark_schema(conn)
 
                     # 首页广告类型与支付关联独立迁移，只追加字段及初始化项。
                     async with ddl_connection() as conn:

@@ -209,6 +209,7 @@ tests/
 # ------------------------------------------
 /build_output/
 /release/
+/desktop-config.json
 /data/
 *.build/
 *.dist/

@@ -82,7 +82,7 @@ class TicketSendRequest(StrictTicketModel):
 
 
 class TicketExportRequest(StrictTicketModel):
-    """导出范围必须由管理员明确勾选，禁止空选择或筛选条件回退到全量。"""
+    """导出范围必须由当前用户明确勾选，禁止空选择或筛选条件回退到全量。"""
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
     order_ids: list[Annotated[str, Field(strict=True, pattern=r"^[1-9][0-9]{0,18}$")]] = Field(min_length=1, max_length=1000)
 

@@ -156,6 +156,7 @@ export interface Item {
 export interface Order {
   id: string
   order_id: string
+  remark?: string  // 订单备注，支持多行
   cookie_id: string
   item_id: string
   item_title?: string  // 商品标题

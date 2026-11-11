@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional, Callable
 from loguru import logger
 
 from .utils import safe_str
+from common.services.chat_realtime_bridge import publish_chat_event
 from common.utils.xianyu_official_accounts import is_xianyu_official_robot_user
 from common.utils.xianyu_utils import decrypt
 from common.utils.xianyu_message_parser import decode_first_content, interpret_content
@@ -580,6 +581,8 @@ class MessageHandler:
                         # 解密消息（参照旧框架）
                         message = self._decrypt_message(sync_data)
                         if message is not None and isinstance(message, dict):
+                            # 实时聊天旁路不参与自动回复；发布失败仍按原流程处理。
+                            await publish_chat_event(self.cookie_id, self.myid, message)
                             await self._process_single_message(message, websocket)
                 return True
             

@@ -28,6 +28,7 @@ from app.services.xianyu.yifan_api_handler import YifanApiHandler
 from common.db.compat import db_manager
 from common.services.order_service import OrderDetailService
 from common.utils.fish_nick_utils import get_buyer_fish_nick
+from common.utils.order_amount import extract_order_detail_amount, parse_order_amount
 from common.utils.response_field import extract_card_api_response_content
 from common.utils.xianyu_utils import trans_cookies
 
@@ -906,12 +907,14 @@ class AutoDeliveryHandler(DeliveryPrecheckMixin):
         try:
             data = res_json.get('data', {})
             components = data.get('components', [])
+            amount, amount_is_estimate = extract_order_detail_amount(components)
             
             result = {
                 'spec_name': '',
                 'spec_value': '',
                 'quantity': '1',
-                'amount': '',
+                'amount': format(amount, '.2f') if amount is not None else '',
+                'amount_is_estimate': amount_is_estimate,
                 'receiver_name': '',
                 'receiver_phone': '',
                 'receiver_address': '',
@@ -928,11 +931,6 @@ class AutoDeliveryHandler(DeliveryPrecheckMixin):
                     # 获取数量
                     buy_amount = item_info.get('buyAmount', '1')
                     result['quantity'] = str(buy_amount)
-                    
-                    # 获取价格
-                    price = item_info.get('price', '')
-                    if price:
-                        result['amount'] = str(price)
                     
                     # 获取规格信息（格式：规格名:规格值）
                     sku_info = item_info.get('skuInfo', '')
@@ -965,7 +963,7 @@ class AutoDeliveryHandler(DeliveryPrecheckMixin):
             
             spec_name = order_detail.get('spec_name', '')
             spec_value = order_detail.get('spec_value', '')
-            amount = order_detail.get('amount')
+            amount = parse_order_amount(order_detail.get('amount'))
             quantity = order_detail.get('quantity', '1')
             receiver_name = order_detail.get('receiver_name', '')
             receiver_phone = order_detail.get('receiver_phone', '')
@@ -990,7 +988,7 @@ class AutoDeliveryHandler(DeliveryPrecheckMixin):
                     update_values['spec_name'] = spec_name
                 if spec_value:
                     update_values['spec_value'] = spec_value
-                if amount:
+                if amount is not None and (not order_detail.get('amount_is_estimate') or existing_order.amount is None):
                     update_values['amount'] = amount
                 if quantity:
                     update_values['quantity'] = int(quantity) if quantity else 1

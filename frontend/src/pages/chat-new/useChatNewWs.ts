@@ -5,10 +5,12 @@
  * 每个已连接账号维护一条独立的 WebSocket，支持自动重连和心跳保活。
  */
 import { useEffect, useRef, useCallback } from 'react'
-import { createChatNewWebSocket, type WsPushMessage, type ChatMessage } from '@/api/chatNew'
+import { createChatNewWebSocket, type WsPushMessage, type ChatMessage, type ConversationReadReceipt } from '@/api/chatNew'
 
 /** 心跳间隔（毫秒） */
 const HEARTBEAT_INTERVAL = 20000
+/** 超过两轮心跳没有任何服务器回应，关闭假在线连接并按现有退避重连。 */
+const HEARTBEAT_TIMEOUT = 45000
 /** 重连延迟（毫秒） */
 const RECONNECT_DELAY = 3000
 /** 连续离线时的重试间隔上限（毫秒） */
@@ -31,6 +33,7 @@ interface UseChatNewWsOptions {
   onConnected?: (accountId: string, isReconnect: boolean) => void
   /** WebSocket 断连时的回调 */
   onDisconnect?: (accountId: string) => void
+  onConversationRead?: (receipt: ConversationReadReceipt) => void
 }
 
 /**
@@ -39,16 +42,18 @@ interface UseChatNewWsOptions {
  * 根据 accountIds 列表自动管理每个账号的 WebSocket 连接。
  * 新增账号自动建连，移除的账号自动断开，已有账号保持不变。
  */
-export function useChatNewWs({ accountIds, onNewMessage, onConnected, onDisconnect }: UseChatNewWsOptions) {
+export function useChatNewWs({ accountIds, onNewMessage, onConnected, onDisconnect, onConversationRead }: UseChatNewWsOptions) {
   const connectionsRef = useRef<Map<string, WsConnection>>(new Map())
   const onNewMessageRef = useRef(onNewMessage)
   const onConnectedRef = useRef(onConnected)
   const onDisconnectRef = useRef(onDisconnect)
+  const onConversationReadRef = useRef(onConversationRead)
 
   // 保持回调引用最新
   useEffect(() => { onNewMessageRef.current = onNewMessage }, [onNewMessage])
   useEffect(() => { onConnectedRef.current = onConnected }, [onConnected])
   useEffect(() => { onDisconnectRef.current = onDisconnect }, [onDisconnect])
+  useEffect(() => { onConversationReadRef.current = onConversationRead }, [onConversationRead])
 
   /** 清理单个账号的连接 */
   const cleanupAccount = useCallback((aid: string) => {
@@ -73,12 +78,15 @@ export function useChatNewWs({ accountIds, onNewMessage, onConnected, onDisconne
 
     const ws = createChatNewWebSocket(aid)
     const conn: WsConnection = { ws, heartbeat: null, reconnect: null, closed: false }
+    let lastReceivedAt = Date.now()
     connectionsRef.current.set(aid, conn)
 
     ws.onopen = () => {
+      lastReceivedAt = Date.now()
       conn.heartbeat = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'ping' }))
+          if (Date.now() - lastReceivedAt > HEARTBEAT_TIMEOUT) ws.close()
+          else ws.send(JSON.stringify({ type: 'ping' }))
         }
       }, HEARTBEAT_INTERVAL)
     }
@@ -86,8 +94,14 @@ export function useChatNewWs({ accountIds, onNewMessage, onConnected, onDisconne
     ws.onmessage = (event) => {
       try {
         const data: WsPushMessage = JSON.parse(event.data)
+        lastReceivedAt = Date.now()
         if (data.event === 'new_message' && data.cid && data.message) {
           onNewMessageRef.current(aid, data.cid, data.message)
+        } else if (data.event === 'conversation_read' && data.cid && data.lastMessageId &&
+          Array.isArray(data.messageIds) && typeof data.lastMessageTime === 'number' &&
+          (!data.account_id || data.account_id === aid)) {
+          onConversationReadRef.current?.({ account_id: aid, cid: data.cid,
+            messageIds: data.messageIds, lastMessageId: data.lastMessageId, lastMessageTime: data.lastMessageTime })
         } else if (data.event === 'connected') {
           // 只有 IM 订阅确认成功才重置退避；握手成功后仍可能收到 4404。
           retryAttempt = 0

@@ -4,6 +4,7 @@ import { Loader2, Search, X } from 'lucide-react'
 import { getMessages, nextChatHistorySearch, startChatHistorySearch,
   type ChatHistoryHit, type ChatHistorySearchBatch, type ChatMessage } from '@/api/chatNew'
 import { mergeMessages, toTimestampMs } from './chat_history_merge'
+import { ItemCardMessage } from './ItemCardMessage'
 
 function when(time: number) {
   const timestamp = Number(time)
@@ -162,7 +163,9 @@ export function ChatHistorySearch({ accountId, onModeChange, onOpenConversation 
         <div className="min-h-0 flex-1 overflow-y-auto">
           {hits.slice(0, visibleCount).map(hit => <button type="button" key={hit.key} onClick={() => void openHit(hit)} className="block w-full border-b border-gray-100 px-3 py-3 text-left hover:bg-blue-50 dark:border-gray-700 dark:hover:bg-gray-700">
             <div className="truncate text-sm font-medium"><Highlight text={hit.conversation.otherUserName || hit.conversation.otherUserId || '未知用户'} query={batch?.query || ''} /></div>
-            <p className="mt-1 line-clamp-3 break-words text-xs leading-5 text-gray-600 dark:text-gray-300"><Highlight text={hit.message?.text || `用户 ID：${hit.conversation.otherUserId}`} query={batch?.query || ''} /></p>
+            {hit.message?.type === 'item' && hit.message.itemCard
+              ? <div className="mt-2"><ItemCardMessage card={hit.message.itemCard} interactive={false} /></div>
+              : <p className="mt-1 line-clamp-3 break-words text-xs leading-5 text-gray-600 dark:text-gray-300"><Highlight text={hit.message?.text || `用户 ID：${hit.conversation.otherUserId}`} query={batch?.query || ''} /></p>}
             <p className="mt-1 truncate text-[11px] text-gray-400">{hit.account.display_name || hit.account.remark || hit.account.account_id}{hit.message ? ` · ${when(hit.message.time)}` : ' · 会话匹配'}</p>
           </button>)}
           {hits.length > visibleCount && <button type="button" onClick={() => setVisibleCount(count => count + 50)} className="w-full px-3 py-4 text-xs text-blue-600 hover:bg-blue-50 dark:hover:bg-gray-700">显示更多结果（还有 {hits.length - visibleCount} 条）</button>}
@@ -175,7 +178,7 @@ export function ChatHistorySearch({ accountId, onModeChange, onOpenConversation 
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
             {loadingContext && <p className="text-center text-xs text-gray-400">正在读取附近聊天记录…</p>}
             {contextError && <p role="alert" className="text-xs text-amber-600">{contextError}</p>}
-            {context.map((message, index) => { const match = !!selected.message && (message.messageId ? message.messageId === selected.message.messageId : message.time === selected.message.time && message.text === selected.message.text); return <div key={message.messageId || index} ref={match ? targetRef : undefined} className={`rounded-lg border p-3 ${match ? 'border-blue-400 bg-blue-50 dark:bg-blue-950/30' : 'border-gray-100 dark:border-gray-700'}`}><p className="mb-2 text-xs text-gray-400">{message.isSelf ? '我' : message.senderName || selected.conversation.otherUserName} · {when(message.time)}{match && <span className="ml-2 text-blue-600">匹配消息</span>}</p><p className="whitespace-pre-wrap break-words text-sm"><Highlight text={message.text || (message.type === 'image' ? '[图片]' : '[消息]')} query={batch?.query || query} /></p></div> })}
+            {context.map((message, index) => { const match = !!selected.message && (message.messageId ? message.messageId === selected.message.messageId : message.time === selected.message.time && message.text === selected.message.text); return <div key={message.messageId || message.clientMessageId || index} ref={match ? targetRef : undefined} className={`rounded-lg border p-3 ${match ? 'border-blue-400 bg-blue-50 dark:bg-blue-950/30' : 'border-gray-100 dark:border-gray-700'}`}><p className="mb-2 text-xs text-gray-400">{message.isSelf ? '我' : message.senderName || selected.conversation.otherUserName} · {when(message.time)}{match && <span className="ml-2 text-blue-600">匹配消息</span>}</p>{message.type === 'item' && message.itemCard ? <ItemCardMessage card={message.itemCard} /> : <p className="whitespace-pre-wrap break-words text-sm"><Highlight text={message.text || (message.type === 'image' ? '[图片]' : '[消息]')} query={batch?.query || query} /></p>}</div> })}
           </div>
           <div className="flex justify-end border-t p-4 dark:border-gray-700"><button type="button" onClick={() => { onOpenConversation(selected); contextGeneration.current += 1; setSelected(null) }} className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white">打开会话</button></div>
         </div>

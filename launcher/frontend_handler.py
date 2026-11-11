@@ -14,10 +14,12 @@ from loguru import logger
 class FrontendHandler(http.server.SimpleHTTPRequestHandler):
     """托管前端页面并代理 API，公开状态请求按 socket 地址转发真实 IP。"""
 
-    def __init__(self, *args, dist_dir: str = "", **kwargs):
+    def __init__(self, *args, dist_dir: str = "", backend_url: str | None = None, **kwargs):
         """保存构建目录与可配置的后端代理地址，初始化请求处理器。"""
         self._dist_dir = dist_dir
-        self._backend_url = os.environ.get("BACKEND_WEB_SERVICE_URL", "http://127.0.0.1:8089").rstrip("/")
+        self._backend_url = (backend_url if backend_url is not None else os.environ.get(
+            "BACKEND_WEB_SERVICE_URL", "http://127.0.0.1:8089"
+        )).rstrip("/")
         super().__init__(*args, directory=dist_dir, **kwargs)
 
     def _proxy_if_needed(self) -> bool:

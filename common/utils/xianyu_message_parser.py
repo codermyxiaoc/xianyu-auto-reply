@@ -25,6 +25,8 @@ import base64
 import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from common.utils.xianyu_item_card import parse_item_card
+
 # 已知的消息内容标识键：命中任一即认为该 dict 是一条消息内容载荷
 _CONTENT_KEYS = ("text", "image", "picUrl", "audio")
 
@@ -105,18 +107,24 @@ def interpret_content(decoded: Dict[str, Any]) -> Tuple[str, List[str], str]:
     - contentType==1 且含 text → 文本
     - contentType==2 且含 image → 图片（取 image.pics[].url）
     - contentType==3 且含 audio → 语音（以 "[语音消息]" 文本表示）
+    - contentType==7 → 商品卡片（摘要为 "[宝贝] 标题"）
     - 兜底：含 text → 文本；含 picUrl → 图片（旧格式）
     - 都不匹配 → 返回空类型 ""，由调用方决定降级策略
 
     Args:
         decoded: 已解析的内容 dict
     Returns:
-        (text, images, msg_type)；msg_type ∈ {"text","image",""}
+        (text, images, msg_type)；msg_type ∈ {"text","image","item",""}
     """
     if not isinstance(decoded, dict):
         return ("", [], "")
 
     content_type = decoded.get("contentType", 0)
+
+    if content_type in (7, "7"):
+        card = parse_item_card(decoded)
+        title = card["title"] if card else ""
+        return (f"[宝贝] {title}" if title else "[宝贝]", [], "item")
 
     if content_type == 1 and "text" in decoded:
         return (_extract_text(decoded["text"]), [], "text")

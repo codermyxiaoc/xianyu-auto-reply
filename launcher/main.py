@@ -55,7 +55,25 @@ def _run_main() -> None:
         from _bootstrap import main as bootstrap_main  # type: ignore  # noqa: E402
     except Exception:
         from launcher._bootstrap import main as bootstrap_main  # type: ignore  # noqa: E402
-    bootstrap_main()
+    from launcher.desktop_config import DesktopConfigError
+    try:
+        bootstrap_main()
+    except DesktopConfigError as exc:
+        # 打包版隐藏控制台，配置错误也必须有可见、可修复的提示。
+        _write_fatal_log("desktop_config")
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                messagebox.showerror("桌面端连接配置错误", str(exc), parent=root)
+            finally:
+                root.destroy()
+        except Exception:
+            if sys.stderr is not None:
+                print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

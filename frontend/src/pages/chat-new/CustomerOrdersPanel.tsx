@@ -4,7 +4,7 @@
  * 展示当前会话对方买家的近期订单，并提供查看详情、取消订单、无物流发货、发卡发货等操作。
  * 仅负责渲染与回调透传，数据与业务逻辑由父组件 ChatNew 维护。
  */
-import { Eye, Loader2, Package, RefreshCw, Truck, X } from 'lucide-react'
+import { Eye, Loader2, Package, RefreshCw, Ticket, Truck, X } from 'lucide-react'
 import type { CustomerOrder } from '@/api/chatNew'
 import { CANCELLABLE_STATUSES, SHIPPABLE_STATUSES, getOrderStatusMeta } from './orderStatus'
 
@@ -23,10 +23,14 @@ interface CustomerOrdersPanelProps {
   cancellingOrderNo: string
   /** 订单详情加载中 */
   loadingOrderDetail: boolean
+  /** 正在读取身份信息配置所需订单详情的订单号 */
+  loadingIdentityOrderNo: string
   /** 同步并刷新订单 */
   onSync: () => void
   /** 查看订单详情 */
   onViewDetail: (orderNo: string) => void
+  /** 复用订单管理的门票弹框，普通用户和管理员均可操作权限内订单 */
+  onIdentityInfo?: (orderNo: string) => void
   /** 取消订单 */
   onCancel: (orderNo: string) => void
   /** 无物流发货 */
@@ -43,8 +47,10 @@ export function CustomerOrdersPanel({
   confirmingOrderNo,
   cancellingOrderNo,
   loadingOrderDetail,
+  loadingIdentityOrderNo,
   onSync,
   onViewDetail,
+  onIdentityInfo,
   onCancel,
   onNoLogistics,
   onDeliver,
@@ -80,6 +86,12 @@ export function CustomerOrdersPanel({
                 <Eye className="w-3.5 h-3.5" />
                 订单详情
               </button>
+              {onIdentityInfo && ['pending_ship', 'shipped', 'completed'].includes(order.status) && (
+                <button onClick={() => onIdentityInfo(order.order_no)} disabled={!!loadingIdentityOrderNo} aria-label={`配置订单 ${order.order_no} 的身份信息`} className="flex items-center justify-center gap-1 py-1.5 rounded border border-blue-200 text-blue-600 hover:bg-blue-50 disabled:opacity-40">
+                  {loadingIdentityOrderNo === order.order_no ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Ticket className="w-3.5 h-3.5" />}
+                  身份信息
+                </button>
+              )}
               {CANCELLABLE_STATUSES.includes(order.status) && (
                 <button onClick={() => onCancel(order.order_no)} disabled={!!cancellingOrderNo || anyActionRunning} className="flex items-center justify-center gap-1 py-1.5 rounded border border-red-200 text-red-500 hover:bg-red-50 disabled:opacity-40">
                   {cancellingOrderNo === order.order_no ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <X className="w-3.5 h-3.5" />}

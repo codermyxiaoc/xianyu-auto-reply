@@ -569,6 +569,50 @@ Vite 开发/预览环境和桌面启动器会识别公开接口的百分号编�
 | `离线依赖打包.bat` | Windows | 打包所有 Python 依赖供离线安装 |
 | `scripts/Pipeline脚本-xianyu-auto-reply.groovy` | Jenkins | CI/CD 流水线，构建多架构镜像并推送到阿里云 ACR |
 
+### Windows 桌面端连接地址
+
+桌面端在启动前读取 EXE 同目录的 `desktop-config.json`。可参照根目录的 `desktop-config.example.json`，文件只包含 `base_url`：
+
+```json
+{"base_url": "local"}
+```
+
+`local` 使用本机完整服务，管理页面为 `http://127.0.0.1:9000`，沿用原有 MySQL、Redis 和浏览器安装流程。`http://localhost:9000`、`http://127.0.0.1:9000`、`http://[::1]:9000` 也会识别为本地模式。源码及完整本地包没有配置文件时仍使用本地模式；精简服务器包必须保留服务器配置，缺少配置或改为 `local` 会明确报错并停止。地址或 JSON 格式错误也会停止启动，不会自动连接另一套后端。
+
+连接已部署的服务器时，例如：
+
+```json
+{"base_url": "http://103.73.119.239:9000"}
+```
+
+这里填写**网页首页入口**，也可使用已配置反向代理的 HTTPS 域名；不要填写 `8089` 裸 API 端口或 `/api/v1` 路径。地址不能包含用户名、密码、查询参数或片段。远程模式打开该站点，页面、API、WebSocket 与门票登记链接使用服务器站点的同一来源，账户和业务数据由服务器处理，不在本机启动后端、数据库连接检查、调度器或 Chromium 安装。
+
+`EXE打包构建.bat` 会先询问连接地址，直接回车为 `local`。地址在清理旧产物、安装构建依赖和编译前完成校验，生成的配置自动放入 `release/XianyuAutoReply/desktop-config.json`，与 EXE 一起分发。脚本优先使用项目 `.venv/Scripts/python.exe`，不存在时使用 PATH 中的 Python；配置、Nuitka 和辅助脚本使用同一解释器。
+
+也可以使用 PowerShell 环境变量提供构建地址，跳过地址询问；原有代理等构建选项仍会提示：
+
+```powershell
+$env:XIANYU_DESKTOP_BASE_URL = 'http://103.73.119.239:9000'
+& '.\EXE打包构建.bat'
+```
+
+单独生成或检查配置，不进行构建：
+
+```powershell
+.\.venv\Scripts\python.exe -B scripts\configure_desktop.py --base-url local --output desktop-config.json
+.\.venv\Scripts\python.exe -B scripts\configure_desktop.py --base-url 'http://103.73.119.239:9000' --output desktop-config.json
+.\.venv\Scripts\python.exe -B scripts\configure_desktop.py --interactive --output desktop-config.json
+.\.venv\Scripts\python.exe -B scripts\configure_desktop.py --base-url 'https://tickets.example.com' --print-mode
+```
+
+配置工具的优先级为 `--base-url`、`XIANYU_DESKTOP_BASE_URL`、交互输入；未指定地址时默认为 `local`。`--print-mode` 单独使用只校验并打印 `local` 或 `remote`，不会写配置。配置以 UTF-8 保存，非法输入不会覆盖原文件，根目录的实际配置已加入 Git 忽略。根目录配置用于源码启动；打包脚本独立读取环境变量或当次交互输入，不会自动沿用根目录已有配置。需要固定构建地址时使用上面的环境变量方式。
+
+远程构建只编译服务器桌面入口、连接配置和界面所需模块，打包 EXE 及必要运行库，不携带本地后端、WebSocket 服务、调度器、前端页面或 Chromium。构建不需要 Node.js、现成的 `frontend/dist` 或业务后端依赖。远程包可以直接修改配置切换到其他服务器首页；如需改用本地服务，请选择 `local` 重新打包，以包含完整本地前端及浏览器资源。本地构建会同时带上当前构建环境的 Python 解释器、标准库、DLL 和 `site-packages`，供包内后端使用，不依赖用户电脑另外安装 Python。
+
+服务器包输出为 `release/XianyuAutoReply-v<版本>-server-win64.zip`，与本地版压缩包名称区分；解压后运行 `XianyuAutoReply.exe`，保留同目录的配置和运行库。服务器模式使用本机 MSVC 构建，编译依赖报告保存在 `build_output/nuitka-remote-report.xml`。
+
+构建清理仅作用于当前项目下的 `build_output` 和 `release`，会先检查实际路径并拒绝符号链接、Windows 目录联接和越界路径。分发包中的运行数据、环境配置、日志与缓存会单独移除，包根目录的 `desktop-config.json` 保留；项目原有业务数据和连接配置不参与清理。
+
 ## 安全说明
 
 - **JWT 认证**：主系统与返佣系统都使用 JWT 做登录态控制

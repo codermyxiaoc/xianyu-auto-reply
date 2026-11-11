@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 from common.utils.xianyu_utils import decrypt
-from common.utils.xianyu_message_parser import parse_content_payloads
+from common.utils.xianyu_item_card import parse_item_card
+from common.utils.xianyu_message_parser import decode_first_content, interpret_content
 
 
 class PushMessageParser:
@@ -106,7 +107,9 @@ class PushMessageParser:
             msg_time = msg_1.get("5", 0)
 
             # 解析 base64 内容
-            text_content, images, msg_type = self._decode_content(msg_1)
+            decoded = self._decode_content_data(msg_1)
+            text_content, images, msg_type = interpret_content(decoded)
+            item_card = parse_item_card(decoded)
             if not text_content and not images:
                 text_content = reminder
                 msg_type = "text"
@@ -137,6 +140,7 @@ class PushMessageParser:
                     "text": text_content,
                     "images": images,
                     "time": msg_time,
+                    **({"itemCard": item_card} if item_card is not None else {}),
                 },
             }
         except Exception as e:
@@ -148,6 +152,12 @@ class PushMessageParser:
         try:
             msg_6_3 = msg_6.get("3", {})
             text_content = msg_6_3.get("2", "[卡片消息]")
+            decoded = self._decode_content_data(msg_1)
+            item_text, _, content_type = interpret_content(decoded)
+            item_card = parse_item_card(decoded)
+            is_item = content_type == "item"
+            if is_item:
+                text_content = item_text
             cid_raw = str(msg_1.get("2", ""))
             cid = cid_raw.split("@")[0] if "@" in cid_raw else cid_raw
             msg_time = msg_1.get("5", 0)
@@ -172,10 +182,11 @@ class PushMessageParser:
                     "senderId": sender_id,
                     "senderName": "系统",
                     "isSelf": sender_id == self.myid,
-                    "type": "card",
+                    "type": "item" if is_item else "card",
                     "text": str(text_content),
                     "images": [],
                     "time": msg_time,
+                    **({"itemCard": item_card} if item_card is not None else {}),
                 },
             }
         except Exception as e:
@@ -230,15 +241,20 @@ class PushMessageParser:
         Returns:
             (text, images, msg_type) 三元组
         """
+        text, images, msg_type = interpret_content(self._decode_content_data(msg_1))
+        return text, images, msg_type or "text"
+
+    def _decode_content_data(self, msg_1: dict) -> Optional[Dict[str, Any]]:
+        """保留解码载荷供摘要和结构化商品卡共用，避免对同一信封重复解码。"""
         try:
             msg_6 = msg_1.get("6", {})
             if not isinstance(msg_6, dict):
-                return ("", [], "text")
+                return None
             msg_6_3 = msg_6.get("3", {})
             if not isinstance(msg_6_3, dict):
-                return ("", [], "text")
+                return None
 
             # 候选载荷按优先级：["5"]（实时推送明文 JSON）→ ["1"]（旧格式 base64）
-            return parse_content_payloads([msg_6_3.get("5", ""), msg_6_3.get("1", "")])
+            return decode_first_content([msg_6_3.get("5", ""), msg_6_3.get("1", "")])
         except Exception:
-            return ("", [], "text")
+            return None

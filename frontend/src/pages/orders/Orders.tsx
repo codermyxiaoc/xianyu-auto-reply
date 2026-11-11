@@ -1,7 +1,7 @@
 import { NativeSelect } from '@/components/common/NativeSelect'
 import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
-import { ShoppingCart, RefreshCw, Search, Trash2, Eye, X, Send, Loader2, Settings, Filter, Ban, Plus, Download } from 'lucide-react'
+import { ShoppingCart, RefreshCw, Search, Trash2, Eye, X, Send, Loader2, Settings, Filter, Ban, Plus, Download, NotebookPen } from 'lucide-react'
 import { fetchXianyuOrders, getOrders, deleteOrder, batchDeleteOrders, getOrderDetail, manualDelivery, type OrderDetail, type OrderFilterParams } from '@/api/orders'
 import { getAccountDetails } from '@/api/accounts'
 import { useUIStore } from '@/store/uiStore'
@@ -11,11 +11,12 @@ import { Select } from '@/components/common/Select'
 import { ConfirmModal } from '@/components/common/ConfirmModal'
 import { BlacklistLevelModal } from './BlacklistLevelModal'
 import { TicketRegistrationModal } from './TicketRegistrationModal'
+import { OrderRemarkModal } from './OrderRemarkModal'
 import { exportTicketRegistrations } from '@/api/ticketRegistration'
 import type { Order, Account } from '@/types'
 
 // 列配置类型
-type ColumnKey = 'cookie_id' | 'order_id' | 'receiver' | 'item_id' | 'sku_info' | 'buyer_id' | 'buyer_fish_nick' | 'chat_id' | 'quantity' | 'amount' | 'status' | 'ticket_collection_status' | 'ticket_export_status' | 'delivery_method' | 'delivery_send_status' | 'delivery_fail_reason' | 'is_bargain' | 'is_rated' | 'is_red_flower' | 'is_unregistered' | 'unregister_error_reason' | 'is_agent_order' | 'source' | 'placed_at' | 'created_at'
+type ColumnKey = 'remark' | 'cookie_id' | 'order_id' | 'receiver' | 'item_id' | 'sku_info' | 'buyer_id' | 'buyer_fish_nick' | 'chat_id' | 'quantity' | 'amount' | 'status' | 'ticket_collection_status' | 'ticket_export_status' | 'delivery_method' | 'delivery_send_status' | 'delivery_fail_reason' | 'is_bargain' | 'is_rated' | 'is_red_flower' | 'is_unregistered' | 'unregister_error_reason' | 'is_agent_order' | 'source' | 'placed_at' | 'created_at'
 
 interface ColumnConfig {
   key: ColumnKey
@@ -45,6 +46,7 @@ const defaultColumns: ColumnConfig[] = [
   { key: 'status', label: '状态', visible: true, fixed: true },
   { key: 'ticket_collection_status', label: '信息收集状态', visible: true },
   { key: 'ticket_export_status', label: '身份信息导出状态', visible: true },
+  { key: 'remark', label: '备注', visible: true },
   { key: 'delivery_method', label: '发货方式', visible: true, fixed: true },
   { key: 'delivery_send_status', label: '发送状态', visible: true },
   { key: 'delivery_fail_reason', label: '发货失败原因', visible: true },
@@ -74,7 +76,7 @@ const statusMap: Record<string, { label: string; class: string }> = {
 
 export function Orders() {
   const { addToast } = useUIStore()
-  const { isAuthenticated, token, _hasHydrated, user } = useAuthStore()
+  const { isAuthenticated, token, _hasHydrated } = useAuthStore()
   const [loading, setLoading] = useState(true)
   const [orders, setOrders] = useState<Order[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
@@ -85,6 +87,7 @@ export function Orders() {
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [deliveringOrderId, setDeliveringOrderId] = useState<string | null>(null)
   const [ticketOrder, setTicketOrder] = useState<Order | null>(null)
+  const [remarkOrder, setRemarkOrder] = useState<Order | null>(null)
   // 分页状态
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
@@ -96,7 +99,7 @@ export function Orders() {
   const [exporting, setExporting] = useState(false)
   const exportInFlight = useRef(false)
   const ordersRequestSequence = useRef(0)
-  const requestedQueryRef = useRef<{ query: AppliedOrderQuery; size: number } | null>(null)
+  const requestedQueryRef = useRef<{ query: AppliedOrderQuery; page: number; size: number } | null>(null)
   
   // 筛选状态
   const [filters, setFilters] = useState<OrderFilterParams>({
@@ -152,7 +155,7 @@ export function Orders() {
     if (!_hasHydrated || !isAuthenticated || !token) return
     const requestSequence = ++ordersRequestSequence.current
     const query: AppliedOrderQuery = { account, status, filters: { ...currentFilters } }
-    requestedQueryRef.current = { query, size }
+    requestedQueryRef.current = { query, page, size }
     try {
       setOrdersLoading(true)
       setSelectedOrderIds(new Set())
@@ -179,7 +182,7 @@ export function Orders() {
   }
 
   const handleExportTickets = async () => {
-    if (!user?.is_admin || ordersLoading || !lastAppliedQuery || exportInFlight.current || selectedOrderIds.size === 0) return
+    if (ordersLoading || !lastAppliedQuery || exportInFlight.current || selectedOrderIds.size === 0) return
     const query = lastAppliedQuery
     const orderIds = [...selectedOrderIds]
     exportInFlight.current = true
@@ -466,18 +469,16 @@ export function Orders() {
             <span className="badge-primary">共 {total} 个订单</span>
           </div>
           <div className="flex items-center gap-2 flex-wrap justify-end">
-            {user?.is_admin && (
-              <button
-                type="button"
-                onClick={handleExportTickets}
-                disabled={ordersLoading || exporting || !lastAppliedQuery || selectedOrderIds.size === 0}
-                className="btn-ios-secondary btn-sm"
-                title={selectedOrderIds.size === 0 ? '请先勾选需要导出的订单' : `仅导出勾选的 ${selectedOrderIds.size} 个订单中已收集的身份信息，未勾选的订单不会导出`}
-              >
-                {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                {exporting ? '正在导出…' : `导出门票身份信息excel${selectedOrderIds.size ? `（${selectedOrderIds.size}）` : ''}`}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={handleExportTickets}
+              disabled={ordersLoading || exporting || !lastAppliedQuery || selectedOrderIds.size === 0}
+              className="btn-ios-secondary btn-sm"
+              title={selectedOrderIds.size === 0 ? '请先勾选需要导出的订单' : `仅导出勾选的 ${selectedOrderIds.size} 个订单中已收集的身份信息，未勾选的订单不会导出`}
+            >
+              {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              {exporting ? '正在导出…' : `导出门票身份信息excel${selectedOrderIds.size ? `（${selectedOrderIds.size}）` : ''}`}
+            </button>
             {selectedOrderIds.size > 0 && (
               <>
                 <button
@@ -745,6 +746,8 @@ export function Orders() {
                             )
                           case 'order_id':
                             return <td key={col.key} className="whitespace-nowrap font-mono text-sm text-slate-600 dark:text-slate-300">{order.order_id}</td>
+                          case 'remark':
+                            return <td key={col.key} className="max-w-[200px] truncate text-sm text-slate-500 dark:text-slate-400" title={order.remark || ''}>{order.remark || '-'}</td>
                           case 'receiver':
                             return (
                               <td key={col.key} className="whitespace-nowrap text-sm">
@@ -960,7 +963,17 @@ export function Orders() {
                       })}
                       <td className="whitespace-nowrap sticky right-0 bg-white dark:bg-slate-900 z-10">
                         <div className="flex items-center gap-1">
-                          {user?.is_admin && ['pending_ship', 'shipped', 'completed'].includes(order.status) && (
+                          <button
+                            type="button"
+                            onClick={() => { if (!remarkOrder) setRemarkOrder(order) }}
+                            disabled={!!remarkOrder}
+                            aria-label={`编辑订单 ${order.order_id} 的备注`}
+                            title="备注"
+                            className="flex items-center gap-1 rounded-lg p-2 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
+                          >
+                            <NotebookPen className="h-4 w-4" />备注
+                          </button>
+                          {['pending_ship', 'shipped', 'completed'].includes(order.status) && (
                             <button
                               onClick={() => setTicketOrder(order)}
                               className="p-2 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
@@ -1184,6 +1197,11 @@ export function Orders() {
                     </div>
                   </div>
 
+                  <div>
+                    <h3 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">订单备注</h3>
+                    <p className="max-h-60 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-gray-50 p-3 text-sm text-gray-700 dark:bg-gray-800 dark:text-gray-300">{orderDetail.remark || '暂无备注'}</p>
+                  </div>
+
                   {/* 发货内容 */}
                   {orderDetail.delivery_content && (
                     <div>
@@ -1377,6 +1395,28 @@ export function Orders() {
             </div>
           </div>
         </div>
+      )}
+
+      {remarkOrder && (
+        <OrderRemarkModal
+          key={remarkOrder.id}
+          order={remarkOrder}
+          onClose={() => setRemarkOrder(null)}
+          onSaved={result => {
+            setOrders(current => current.map(order => order.id === result.order_id ? { ...order, remark: result.remark } : order))
+            setOrderDetail(current => current?.id === result.order_id ? { ...current, remark: result.remark } : current)
+            setRemarkOrder(current => current?.id === result.order_id ? null : current)
+            addToast({ type: 'success', message: result.remark ? '订单备注已保存' : '订单备注已清空' })
+            // 备注变化会使已收集身份信息恢复未导出，以服务端结果重算当前筛选。
+            // 新查询序号同时废弃保存前仍在途的列表响应，避免旧备注覆盖新值。
+            const latestRequest = requestedQueryRef.current
+            if (latestRequest) {
+              void loadOrders(latestRequest.page, latestRequest.size, latestRequest.query.filters, latestRequest.query.account, latestRequest.query.status)
+            } else {
+              void loadOrders()
+            }
+          }}
+        />
       )}
 
       {ticketOrder && (

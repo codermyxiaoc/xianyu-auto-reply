@@ -4,12 +4,14 @@ import type { ChatMessage, Conversation } from '@/api/chatNew'
 export const toTimestampMs = (timestamp: number) =>
   timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp
 
-/** failed=false 是本地发送结果的标记；服务端历史消息没有该字段。 */
+/** failed=false 标记本地发送结果或服务端发送确认；历史消息没有该字段。 */
 const isLocalPlaceholder = (message: ChatMessage) =>
   !message.messageId && message.isSelf && message.failed === false
 
 const matchesPlaceholder = (message: ChatMessage, placeholder: ChatMessage) =>
+  (!message.clientMessageId || !placeholder.clientMessageId || message.clientMessageId === placeholder.clientMessageId) &&
   message.isSelf && message.type === placeholder.type &&
+  (message.type !== 'item' || (!!message.itemCard?.itemId && message.itemCard.itemId === placeholder.itemCard?.itemId)) &&
   message.text === placeholder.text &&
   message.images.length === placeholder.images.length &&
   message.images.every((url, index) => url === placeholder.images[index]) &&
@@ -17,25 +19,36 @@ const matchesPlaceholder = (message: ChatMessage, placeholder: ChatMessage) =>
 
 /** 合并两组消息，优先保留 latest 中同 ID 的记录，保留不同 ID 的真实消息。 */
 export function mergeMessages(latest: ChatMessage[], existing: ChatMessage[]): ChatMessage[] {
-  const identified = new Map<string, ChatMessage>()
-  const unidentified = new Set<ChatMessage>()
-  for (const message of [...latest, ...existing]) {
-    if (message.messageId) {
-      if (!identified.has(message.messageId)) identified.set(message.messageId, message)
-    } else {
-      unidentified.add(message)
+  const identified = new Map<string, number>()
+  const confirmations = new Map<string, number>()
+  const distinct: ChatMessage[] = []
+  for (const message of new Set([...latest, ...existing])) {
+    const index = (message.messageId ? identified.get(message.messageId) : undefined) ??
+      (message.clientMessageId ? confirmations.get(message.clientMessageId) : undefined)
+    const position = index ?? distinct.length
+    if (index === undefined) distinct.push(message)
+    else if (!distinct[index].messageId && message.messageId) {
+      // 真实 IM 消息优先于没有真实 ID 的发送确认。
+      distinct[index] = { ...message, clientMessageId: message.clientMessageId || distinct[index].clientMessageId }
+    } else if (!distinct[index].clientMessageId && message.clientMessageId) {
+      distinct[index] = { ...distinct[index], clientMessageId: message.clientMessageId }
     }
+    if (message.messageId) identified.set(message.messageId, position)
+    if (message.clientMessageId) confirmations.set(message.clientMessageId, position)
   }
-  const merged = [...identified.values()]
+  const merged = distinct.filter((message) => !isLocalPlaceholder(message))
   const matchedIds = new Set<string>()
-  for (const message of unidentified) {
-    const match = isLocalPlaceholder(message) && merged.find((candidate) =>
+  for (const message of distinct.filter(isLocalPlaceholder)) {
+    const match = merged.find((candidate) =>
       candidate.messageId && !matchedIds.has(candidate.messageId) &&
       matchesPlaceholder(candidate, message),
     )
     if (match) {
       // 一条服务端消息只能替换一个本地占位，不能吞掉连续发送的相同内容。
       matchedIds.add(match.messageId)
+      if (message.clientMessageId && !match.clientMessageId) {
+        merged[merged.indexOf(match)] = { ...match, clientMessageId: message.clientMessageId }
+      }
     } else {
       merged.push(message)
     }

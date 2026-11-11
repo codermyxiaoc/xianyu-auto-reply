@@ -57,12 +57,36 @@ export interface Conversation {
 }
 
 /** 聊天消息 */
+export interface ChatItemCard {
+  itemId: string
+  title: string
+  price: string
+  mainPic: string
+  url: string
+}
+
+export interface ChatSendableItem extends ChatItemCard {
+  canSend: boolean
+  unavailableReason?: string
+}
+
+export interface ChatItemsPage {
+  items: ChatSendableItem[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+}
+
 export interface ChatMessage {
   messageId: string
+  /** 同一次发送的 HTTP 确认与广播共享的关联 ID，不作为闲鱼真实消息 ID。 */
+  clientMessageId?: string
   senderId: string
   senderName: string
   isSelf: boolean
-  type: 'text' | 'image' | 'system' | 'card'
+  type: 'text' | 'image' | 'system' | 'card' | 'item'
+  itemCard?: ChatItemCard
   text: string
   images: string[]
   time: number
@@ -169,14 +193,30 @@ export const getConversations = async (
   return data
 }
 
+/** 当前聊天账号的可发送商品，按标题或 ID 搜索。 */
+export async function getChatItems(accountId: string, page = 1, keyword = ''): Promise<ChatItemsPage> {
+  const params = new URLSearchParams({ page: String(page), page_size: '20', keyword: keyword.trim() })
+  const response = await get<{ success: boolean; message?: string; data?: ChatItemsPage }>(
+    `${PREFIX}/items/${encodeURIComponent(accountId)}?${params}`,
+  )
+  if (!response.success || !response.data) throw new Error(response.message || '读取我的宝贝失败')
+  return response.data
+}
+
+/** 只提交商品 ID，卡片内容由服务端从当前账号商品中读取。 */
+export const sendItemMessage = (accountId: string, cid: string, toUserId: string, itemId: string) =>
+  post<{ success: boolean; message?: string; data?: { message: ChatMessage } }>(
+    `${PREFIX}/send-item/${encodeURIComponent(accountId)}`, { cid, toUserId, itemId },
+  )
+
 /** 发送文本消息 */
 export const sendTextMessage = async (
   accountId: string,
   cid: string,
   toUserId: string,
   text: string,
-): Promise<{ success: boolean; message: string; data?: { messageId: string } }> => {
-  return post<{ success: boolean; message: string; data?: { messageId: string } }>(`${PREFIX}/send-message/${accountId}`, {
+): Promise<{ success: boolean; message: string; data?: { messageId: string; clientMessageId?: string; time?: number } }> => {
+  return post<{ success: boolean; message: string; data?: { messageId: string; clientMessageId?: string; time?: number } }>(`${PREFIX}/send-message/${accountId}`, {
     cid,
     toUserId,
     text,
@@ -189,12 +229,12 @@ export const sendImageMessage = async (
   cid: string,
   toUserId: string,
   file: File,
-): Promise<{ success: boolean; message: string; data?: { messageId: string; imageUrl: string } }> => {
+): Promise<{ success: boolean; message: string; data?: { messageId: string; imageUrl: string; clientMessageId?: string; time?: number } }> => {
   const formData = new FormData()
   formData.append('cid', cid)
   formData.append('toUserId', toUserId)
   formData.append('image', file)
-  return post<{ success: boolean; message: string; data?: { messageId: string; imageUrl: string } }>(
+  return post<{ success: boolean; message: string; data?: { messageId: string; imageUrl: string; clientMessageId?: string; time?: number } }>(
     `${PREFIX}/send-image/${accountId}`,
     formData,
   )
@@ -323,12 +363,31 @@ export const deleteQuickPhrase = async (id: number): Promise<{ success: boolean;
 
 // ==================== WebSocket 实时推送 ====================
 
+export interface ConversationReadReceipt {
+  account_id: string
+  cid: string
+  messageIds: string[]
+  lastMessageId: string
+  lastMessageTime: number
+}
+
+export async function markConversationRead(accountId: string, payload: Omit<ConversationReadReceipt, 'account_id'>): Promise<ConversationReadReceipt> {
+  const response = await post<{ success: boolean; message?: string; data: ConversationReadReceipt }>(
+    `${PREFIX}/mark-read/${encodeURIComponent(accountId)}`, payload,
+  )
+  if (!response.success || !response.data) throw new Error(response.message || '同步已读失败')
+  return response.data
+}
+
 /** WebSocket 推送消息（新消息事件） */
 export interface WsPushMessage {
-  event: 'new_message' | 'connected' | 'pong'
+  event: 'new_message' | 'connected' | 'pong' | 'conversation_read'
   cid?: string
   account_id?: string
   message?: ChatMessage
+  messageIds?: string[]
+  lastMessageId?: string
+  lastMessageTime?: number
 }
 
 /**

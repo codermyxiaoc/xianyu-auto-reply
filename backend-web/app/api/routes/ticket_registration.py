@@ -1,4 +1,4 @@
-"""门票管理员API和免登录实名登记API；所有响应禁止缓存。"""
+"""按订单归属授权的门票管理API和免登录实名登记API；所有响应禁止缓存。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request
@@ -19,6 +19,7 @@ from common.schemas.ticket_message_template import PersonalTicketMessageTemplate
 from common.schemas.ticket_registration import TicketAgeRules, TicketConfigRequest, TicketPhoneRequest, TicketSendRequest, TicketSubmitRequest
 from common.services.redis_rate_limit_service import check_sliding_window_limit
 from common.utils.http_utils import get_client_ip
+from common.utils.auth_scope import resolve_owner_scope
 
 
 class PrivateTicketRoute(APIRoute):
@@ -41,7 +42,7 @@ class PrivateTicketRoute(APIRoute):
                 response = JSONResponse({"success": False, "code": exc.code, "message": exc.message, "data": None})
             except HTTPException as exc:
                 response = JSONResponse({"success": False, "code": exc.status_code,
-                    "message": ("请先登录" if request.url.path.endswith(("/personal-age-policy", "/personal-message-template")) else "请先使用管理员账号登录") if exc.status_code in {401, 403} else "请求不可用", "data": None})
+                    "message": "请先登录" if exc.status_code == 401 else "无权执行此操作" if exc.status_code == 403 else "请求不可用", "data": None})
             except Exception as exc:
                 # 不用logger.exception，避免诊断局部变量中的实名信息或完整请求内容。
                 logger.error("门票登记请求失败: error_type={}", type(exc).__name__)
@@ -57,7 +58,7 @@ router = APIRouter(prefix="/ticket-registration", tags=["门票实名登记"], r
 
 
 def frontend_origin(request: Request) -> str:
-    """仅已认证管理员路由使用此header；不信任买家提交地址，不写入全局配置。"""
+    """仅已认证的订单管理路由使用此header；不信任买家提交地址，不写入全局配置。"""
     candidate = request.headers.get("X-Frontend-Origin")
     if candidate is None:
         candidate = request.headers.get("Origin") or str(request.base_url).rstrip("/")
@@ -77,7 +78,7 @@ async def limit_public(request: Request, token: str) -> None:
 
 
 @router.get("/types", response_model=ApiResponse)
-async def get_types(current_user: User = Depends(deps.get_current_admin_user), session: AsyncSession = Depends(deps.get_db_session)):
+async def get_types(current_user: User = Depends(deps.get_current_active_user), session: AsyncSession = Depends(deps.get_db_session)):
     return ApiResponse(success=True, data=await TicketRegistrationService(session).types())
 
 
@@ -132,24 +133,28 @@ async def save_personal_message_template(payload: PersonalTicketMessageTemplateR
 
 
 @router.get("/orders/{order_id}", response_model=ApiResponse)
-async def get_order(request: Request, order_id: int = Path(gt=0, le=9223372036854775807), current_user: User = Depends(deps.get_current_admin_user), session: AsyncSession = Depends(deps.get_db_session)):
-    return ApiResponse(success=True, data=await TicketRegistrationService(session, frontend_origin(request)).get_admin(order_id))
+async def get_order(request: Request, order_id: int = Path(gt=0, le=9223372036854775807), current_user: User = Depends(deps.get_current_active_user), session: AsyncSession = Depends(deps.get_db_session)):
+    owner_id, _ = resolve_owner_scope(current_user)
+    return ApiResponse(success=True, data=await TicketRegistrationService(session, frontend_origin(request), owner_id=owner_id).get_admin(order_id))
 
 
 @router.put("/orders/{order_id}", response_model=ApiResponse)
-async def save_order(request: Request, payload: TicketConfigRequest, order_id: int = Path(gt=0, le=9223372036854775807), current_user: User = Depends(deps.get_current_admin_user), session: AsyncSession = Depends(deps.get_db_session)):
-    return ApiResponse(success=True, message="门票配置已保存，登记链接已生成", data=await TicketRegistrationService(session, frontend_origin(request)).save(order_id, payload))
+async def save_order(request: Request, payload: TicketConfigRequest, order_id: int = Path(gt=0, le=9223372036854775807), current_user: User = Depends(deps.get_current_active_user), session: AsyncSession = Depends(deps.get_db_session)):
+    owner_id, _ = resolve_owner_scope(current_user)
+    return ApiResponse(success=True, message="门票配置已保存，登记链接已生成", data=await TicketRegistrationService(session, frontend_origin(request), owner_id=owner_id).save(order_id, payload))
 
 
 @router.post("/orders/{order_id}/send", response_model=ApiResponse)
-async def send_order(request: Request, payload: TicketSendRequest, order_id: int = Path(gt=0, le=9223372036854775807), current_user: User = Depends(deps.get_current_admin_user), session: AsyncSession = Depends(deps.get_db_session)):
-    message, data = await TicketRegistrationService(session, frontend_origin(request)).send(order_id, payload.version)
+async def send_order(request: Request, payload: TicketSendRequest, order_id: int = Path(gt=0, le=9223372036854775807), current_user: User = Depends(deps.get_current_active_user), session: AsyncSession = Depends(deps.get_db_session)):
+    owner_id, _ = resolve_owner_scope(current_user)
+    message, data = await TicketRegistrationService(session, frontend_origin(request), owner_id=owner_id).send(order_id, payload.version)
     return ApiResponse(success=True, message=message, data=data)
 
 
 @router.post("/orders/{order_id}/recollect", response_model=ApiResponse)
-async def recollect_order(request: Request, payload: TicketSendRequest, order_id: int = Path(gt=0, le=9223372036854775807), current_user: User = Depends(deps.get_current_admin_user), session: AsyncSession = Depends(deps.get_db_session)):
-    data = await TicketRegistrationService(session, frontend_origin(request)).recollect(order_id, payload.version)
+async def recollect_order(request: Request, payload: TicketSendRequest, order_id: int = Path(gt=0, le=9223372036854775807), current_user: User = Depends(deps.get_current_active_user), session: AsyncSession = Depends(deps.get_db_session)):
+    owner_id, _ = resolve_owner_scope(current_user)
+    data = await TicketRegistrationService(session, frontend_origin(request), owner_id=owner_id).recollect(order_id, payload.version)
     return ApiResponse(success=True, message="原身份信息和导出记录已清除，订单已恢复待收集", data=data)
 
 

@@ -3,7 +3,6 @@ import { useEffect } from 'react'
 import { AuthNavbar, PublicPageFooter } from '@/components/common/AuthNavbar'
 import { PublicAdvertisements } from '@/components/common/PublicAdvertisements'
 import { usePublicAdvertisements } from '@/components/common/usePublicAdvertisements'
-import { HomeContacts } from './HomeContacts'
 
 export function Home() {
   const advertisements = usePublicAdvertisements('home')
@@ -17,7 +16,6 @@ export function Home() {
       <main className="mx-auto max-w-[90rem] px-3 pb-10 pt-20 sm:px-6">
         <PublicAdvertisements placement="home" {...advertisements} />
         <div className="mx-auto max-w-7xl">
-          <HomeContacts />
           <PublicPageFooter />
         </div>
       </main>

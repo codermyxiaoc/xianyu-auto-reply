@@ -13,6 +13,7 @@ import { TokenRemoteSettingsCard } from './TokenRemoteSettingsCard'
 import { usePersonalSettingsData } from './usePersonalSettingsData'
 import { usePersonalFinance } from './usePersonalFinance'
 import { IdentitySettingsTab } from '../settings/IdentitySettingsTab'
+import { ChatSoundSettingsCard } from './ChatSoundSettingsCard'
 
 export function PersonalSettings() {
   const settings = usePersonalSettingsData()
@@ -60,6 +61,7 @@ export function PersonalSettings() {
       {activeTab === 'identity' && <IdentitySettingsTab scope="personal" />}
 
       <div className={activeTab === 'basic' ? 'space-y-4' : 'hidden'}>
+        <ChatSoundSettingsCard />
         <PersonalBasicSettings settings={settings} finance={finance} />
       </div>
       {remoteOpened && (

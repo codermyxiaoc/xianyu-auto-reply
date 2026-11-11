@@ -25,6 +25,7 @@ from common.models.xy_order import XYOrder
 from common.models.xy_catalog_item import XYCatalogItem
 from common.models.auto_reply_message_log import XYAutoReplyMessageLog
 from common.models.ticket_registration import TicketRegistration
+from common.utils.order_amount import extract_order_detail_amount, parse_order_amount
 
 
 # 复用的 goofish API 连接池（TCPConnector）
@@ -66,6 +67,35 @@ class OrderService:
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def save_remark(self, order_id: int, remark: str, *, owner_id: int | None) -> bool:
+        """只更新内部备注；普通用户必须同时拥有订单及关联闲鱼账号。"""
+        from common.models.xy_account import XYAccount
+
+        statement = select(XYOrder).where(XYOrder.id == order_id)
+        if owner_id is not None:
+            statement = statement.where(
+                XYOrder.owner_id == owner_id,
+                select(XYAccount.id).where(
+                    XYAccount.account_id == XYOrder.account_id,
+                    XYAccount.owner_id == owner_id,
+                ).exists(),
+            )
+        order = (await self.session.execute(
+            statement.with_for_update().execution_options(populate_existing=True)
+        )).scalar_one_or_none()
+        if order is None:
+            return False
+        if (order.remark or "") != remark:
+            order.remark = remark if remark else None
+            # 备注属于 Excel 内容；与导出统一按订单→登记加锁，且不改变买家填表版本。
+            await self.session.execute(update(TicketRegistration).where(
+                TicketRegistration.order_id == order_id,
+                TicketRegistration.submitted_at.is_not(None),
+                TicketRegistration.exported_at.is_not(None),
+            ).values(exported_at=None))
+        await self.session.commit()
+        return True
 
     async def _get_item_titles(self, owner_id: int | None, item_ids: list[str]) -> Dict[str, str]:
         """批量获取商品标题
@@ -1199,7 +1229,6 @@ class OrderService:
         Returns:
             解析后的订单字典
         """
-        from decimal import Decimal
         from datetime import datetime
         
         common = item.get('commonData', {})
@@ -1231,12 +1260,8 @@ class OrderService:
         seller_rate_status = common.get('sellerRateStatus', '')
         is_rated = seller_rate_status == '4'
         
-        # 金额
-        total_price = price_vo.get('totalPrice', '0')
-        try:
-            amount = Decimal(total_price)
-        except Exception:
-            amount = None
+        # totalPrice 是订单总金额（元）；缺失时不能用默认 0 覆盖已有金额。
+        amount = parse_order_amount(price_vo.get('totalPrice'))
         
         # 数量
         try:
@@ -1301,8 +1326,11 @@ class OrderService:
                 update_values['buyer_nick'] = parsed['buyer_nick']
             if parsed.get('item_id') and not existing.item_id:
                 update_values['item_id'] = parsed['item_id']
-            if parsed.get('amount') is not None and not existing.amount:
-                update_values['amount'] = parsed['amount']
+            amount = parse_order_amount(parsed.get('amount'))
+            # 成交总价随闲鱼改价同步；商品单价估算只补缺失，不能覆盖成交价。
+            if amount is not None and amount != existing.amount:
+                if not parsed.get('amount_is_estimate') or existing.amount is None:
+                    update_values['amount'] = amount
             # quantity 同步策略：
             # 旧条件 `not existing.quantity or existing.quantity == 0` 在 existing.quantity=1
             # （Integer 列默认值）时永远为 False，导致一旦订单首次写入就不再同步 quantity，
@@ -1527,7 +1555,6 @@ class OrderService:
         Returns:
             解析后的订单字典（供 _upsert_order 使用）
         """
-        from decimal import Decimal
         from datetime import datetime
 
         common = item.get('commonData', {})
@@ -1542,11 +1569,9 @@ class OrderService:
             quantity = int(price_vo.get('buyNum', '1'))
         except (ValueError, TypeError):
             quantity = 1
-        try:
-            # 订单金额 = 单价 auctionPrice × 数量 buyNum（退款接口无 totalPrice 字段）
-            amount = Decimal(price_vo.get('auctionPrice', '0')) * quantity
-        except Exception:
-            amount = None
+        # 退款列表只有商品单价，估算值不能覆盖此前同步的成交总价。
+        unit_price = parse_order_amount(price_vo.get('auctionPrice'))
+        amount = parse_order_amount(unit_price * quantity) if unit_price is not None else None
 
         placed_at = None
         create_time_str = common.get('createTime', '')
@@ -1563,6 +1588,7 @@ class OrderService:
             'buyer_id': buyer_info.get('buyerId', ''),
             'buyer_nick': buyer_info.get('userNick', ''),
             'amount': amount,
+            'amount_is_estimate': True,
             'quantity': quantity,
             'placed_at': placed_at,
         }
@@ -1729,8 +1755,9 @@ class OrderDetailService:
                         update_values['spec_name'] = detail['spec_name']
                     if detail.get('spec_value'):
                         update_values['spec_value'] = detail['spec_value']
-                    if detail.get('amount'):
-                        update_values['amount'] = detail['amount']
+                    amount = parse_order_amount(detail.get('amount'))
+                    if amount is not None and (not detail.get('amount_is_estimate') or existing_order.amount is None):
+                        update_values['amount'] = amount
                     if detail.get('quantity'):
                         update_values['quantity'] = detail['quantity']
                     
@@ -1929,6 +1956,7 @@ class OrderDetailService:
         try:
             data = res_json.get('data', {})
             components = data.get('components', [])
+            amount, amount_is_estimate = extract_order_detail_amount(components)
             
             result = {
                 'item_id': '',
@@ -1936,7 +1964,8 @@ class OrderDetailService:
                 'spec_name': '',
                 'spec_value': '',
                 'quantity': '1',
-                'amount': '',
+                'amount': format(amount, '.2f') if amount is not None else '',
+                'amount_is_estimate': amount_is_estimate,
                 'receiver_name': '',
                 'receiver_phone': '',
                 'receiver_address': '',
@@ -1985,11 +2014,6 @@ class OrderDetailService:
                     # 获取数量
                     buy_amount = item_info.get('buyAmount', '1')
                     result['quantity'] = str(buy_amount)
-                    
-                    # 获取价格
-                    price = item_info.get('price', '')
-                    if price:
-                        result['amount'] = str(price)
                     
                     # 获取规格信息（格式：规格名:规格值）
                     sku_info = item_info.get('skuInfo', '')

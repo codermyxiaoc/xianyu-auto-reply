@@ -64,17 +64,12 @@ class ImTransportMixin:
             },
         }
 
-        try:
-            reg_response = await self._send_and_wait(reg_mid, reg_msg, timeout=5)
-            reg_code = reg_response.get("code", 0)
-            logger.info(
-                f"【{self.account_id}】注册响应: code={reg_code}, "
-                f"body={json.dumps(reg_response.get('body', {}), ensure_ascii=False)[:200]}"
-            )
-            if reg_code != 200:
-                logger.warning(f"【{self.account_id}】注册返回非200: {reg_code}")
-        except Exception as e:
-            logger.warning(f"【{self.account_id}】等待注册响应异常: {e}，继续尝试")
+        # 未确认注册不能标成在线，否则浏览器收到 pong 但永远收不到推送。
+        reg_response = await self._send_and_wait(reg_mid, reg_msg, timeout=5)
+        reg_code = reg_response.get("code", 0)
+        logger.info(f"【{self.account_id}】注册响应: code={reg_code}")
+        if reg_code != 200:
+            raise ImRequestRejected(f"IM注册失败: code={reg_code}", reg_code)
 
         # 发送 ackDiff
         current_time = int(time.time() * 1000)
@@ -376,6 +371,8 @@ class ImTransportMixin:
                     logger.warning(
                         f"【{self.account_id}】心跳发送失败: {e}"
                     )
+                    self._connected = False
+                    self._registered = False
                     break
         except asyncio.CancelledError:
             pass

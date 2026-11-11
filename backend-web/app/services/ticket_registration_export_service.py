@@ -10,12 +10,12 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.ticket_registration_service import TicketRegistrationError, TicketRegistrationService
+from app.services.ticket_registration_service import TicketRegistrationError, TicketRegistrationService, ticket_order_scope
 from common.models.ticket_registration import TicketRegistration
 from common.models.xy_order import XYOrder
 from common.utils.time_utils import get_beijing_now_naive
 
-EXPORT_HEADERS = ("订单号", "日期", "姓名", "身份证", "票种", "用户名", "手机号")
+EXPORT_HEADERS = ("订单号", "日期", "姓名", "身份证", "票种", "用户名", "手机号", "备注")
 XLSX_MAX_ROWS = 1_048_576
 
 
@@ -27,7 +27,7 @@ def build_ticket_workbook(rows: list[tuple]) -> bytes:
     stripe_fill = PatternFill("solid", fgColor="F2F6FC")
     header_font = Font(name="Microsoft YaHei", size=11, color="FFFFFF", bold=True)
     body_font = Font(name="Microsoft YaHei", size=11, color="243247")
-    widths = (29, 15, 19, 27, 23, 25, 19)
+    widths = (29, 15, 19, 27, 23, 25, 19, 60)
 
     def new_sheet():
         number = len(workbook.worksheets) + 1
@@ -64,7 +64,9 @@ def build_ticket_workbook(rows: list[tuple]) -> bytes:
                     cell.data_type = "s"
                     cell.number_format = "@"
                 cell.font = body_font
-                cell.alignment = Alignment(vertical="center", horizontal="left", indent=1)
+                cell.alignment = Alignment(vertical="center", horizontal="left", indent=1, wrap_text=column == 8)
+                if column == 8 and value:
+                    sheet.row_dimensions[row_number].height = min(120, max(26, 18 * (str(value).count("\n") + 1)))
                 if row_number % 2 == 0:
                     cell.fill = stripe_fill
         sheet.auto_filter.ref = sheet.dimensions
@@ -79,19 +81,29 @@ async def export_ticket_registrations(
     session: AsyncSession,
     *,
     order_ids: list[int],
+    owner_id: int | None = None,
 ) -> bytes:
     if not order_ids or len(order_ids) > 1000:
         raise TicketRegistrationError("请勾选 1 至 1000 个要导出的订单")
     if any(type(value) is not int or value < 1 or value > 9223372036854775807 for value in order_ids):
         raise TicketRegistrationError("勾选的订单 ID 不正确")
+    selected_ids = set(order_ids)
+    scope = ticket_order_scope(owner_id)
+    # 管理员与普通用户均先锁订单再标记登记，与保存备注的锁顺序一致。
+    # 备注使用此锁定读取的当前值，不能使用 MySQL 旧事务快照中的普通查询值。
+    locked_remarks = dict((await session.execute(select(XYOrder.id, XYOrder.remark).where(
+        XYOrder.id.in_(selected_ids), *scope,
+    ).order_by(XYOrder.id).with_for_update())).all())
+    if owner_id is not None and set(locked_remarks) != selected_ids:
+        raise TicketRegistrationError("勾选的订单不存在或无权导出，请刷新订单列表后重试", 403)
     statement = (
         select(XYOrder, TicketRegistration)
         .join(TicketRegistration, TicketRegistration.order_id == XYOrder.id)
-        .where(XYOrder.id.in_(set(order_ids)), TicketRegistration.submitted_at.is_not(None))
+        .where(XYOrder.id.in_(selected_ids), *scope, TicketRegistration.submitted_at.is_not(None))
         .order_by(XYOrder.placed_at.is_(None), XYOrder.placed_at.desc(), XYOrder.id.desc())
         .execution_options(yield_per=250)
     )
-    service = TicketRegistrationService(session)
+    service = TicketRegistrationService(session, owner_id=owner_id)
     # 先加载密钥，避免 MySQL 流式游标未关闭时在同一连接执行另一条查询。
     await service._get_cipher()
     result = await session.stream(statement)
@@ -108,7 +120,7 @@ async def export_ticket_registrations(
                     if not identity.get("name") or not identity.get("id_number"):
                         raise TicketRegistrationError("已收集的登记中有身份信息缺失，请检查后重新导出")
                     rows.append((order.order_no, registration.visit_date, identity.get("name", ""),
-                                 identity.get("id_number", ""), visitor["ticket_type_name"], username, phone))
+                                 identity.get("id_number", ""), visitor["ticket_type_name"], username, phone, locked_remarks[order.id] or ""))
                 snapshots.append((registration.id, registration.version,
                                   registration.identity_ciphertext, registration.phone_ciphertext))
     finally:
@@ -127,6 +139,9 @@ async def export_ticket_registrations(
                     TicketRegistration.submitted_at.is_not(None),
                     TicketRegistration.identity_ciphertext == identity_ciphertext,
                     TicketRegistration.phone_ciphertext == phone_ciphertext,
+                    TicketRegistration.order_id.in_(select(XYOrder.id).where(
+                        XYOrder.id.in_(selected_ids), *scope,
+                    )),
                 ).values(exported_at=exported_at).execution_options(synchronize_session=False)
             )
             if marked.rowcount != 1:

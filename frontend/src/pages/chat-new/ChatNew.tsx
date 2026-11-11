@@ -5,8 +5,10 @@
  * 支持多账号切换，基于WebSocket API获取数据
  */
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { Loader2, LogIn, LogOut, MessageCircle, RefreshCw, User, ChevronUp, X, Send, AlertCircle, Ban, ImagePlus } from 'lucide-react'
+import { Loader2, LogIn, LogOut, MessageCircle, RefreshCw, User, ChevronUp, X, Send, AlertCircle, Ban, ImagePlus, Package, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import { useLocation } from 'react-router-dom'
 import { useUIStore } from '@/store/uiStore'
+import { useAuthStore } from '@/store/authStore'
 import {
   getChatAccounts,
   getConnectedChatAccountIds,
@@ -16,6 +18,7 @@ import {
   getMessages,
   sendTextMessage,
   sendImageMessage,
+  sendItemMessage,
   queryUserInfos,
   getAccountProfile,
   getCustomerOrders,
@@ -32,9 +35,12 @@ import {
   type CustomerOrder,
   type QuickPhrase,
   type ChatHistoryHit,
+  type ChatSendableItem,
 } from '@/api/chatNew'
 import { cancelOrder, fetchXianyuOrders, getOrderDetail, manualDelivery, noLogisticsDelivery, type OrderDetail } from '@/api/orders'
 import { useChatNewWs } from './useChatNewWs'
+import { useChatNotificationSound } from './useChatNotificationSound'
+import { useConversationRead } from './useConversationRead'
 import { appendMsg, mergeConversations, mergeMessages, toTimestampMs } from './chat_history_merge'
 import { ChatHistoryRecovery, recoverConversations, recoverMessages,
   type ConversationCache, type MessageCache } from './chat_history_recovery'
@@ -43,6 +49,9 @@ import { CustomerOrdersPanel } from './CustomerOrdersPanel'
 import { QuickPhrasesPanel } from './QuickPhrasesPanel'
 import { OrderDetailModal } from './OrderDetailModal'
 import { ChatHistorySearch } from './ChatHistorySearch'
+import { TicketRegistrationModal } from '../orders/TicketRegistrationModal'
+import { ItemPickerModal } from './ItemPickerModal'
+import { ItemCardMessage } from './ItemCardMessage'
 
 /** 检查昵称是否为纯数字（如用户ID），纯数字视为无效昵称 */
 const isPureDigits = (name: string) => /^\d+$/.test(name)
@@ -56,6 +65,10 @@ const canRecallMessage = (message: ChatMessage) =>
 
 export function ChatNew() {
   const { addToast } = useUIStore()
+  const canManageIdentity = useAuthStore((state) => !!state.user)
+  const userId = useAuthStore((state) => state.user?.user_id)
+  const { notify: notifySound } = useChatNotificationSound(userId)
+  const location = useLocation()
 
   // 账号相关（分页加载）
   const [accounts, setAccounts] = useState<ChatAccount[]>([])
@@ -65,6 +78,9 @@ export function ChatNew() {
   const [accountPage, setAccountPage] = useState(1)
   const [accountHasMore, setAccountHasMore] = useState(false)
   const accountListRef = useRef<HTMLDivElement>(null)
+  const [accountsCollapsed, setAccountsCollapsed] = useState(false)
+  const collapseAccountsRef = useRef<HTMLButtonElement>(null)
+  const expandAccountsRef = useRef<HTMLButtonElement>(null)
 
   // 会话相关
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -80,6 +96,7 @@ export function ChatNew() {
   const [msgHasMore, setMsgHasMore] = useState(false)
   const [msgCursor, setMsgCursor] = useState<number | null>(null)
   const msgContainerRef = useRef<HTMLDivElement>(null)
+  const historyScrollRef = useRef<{ top: number; height: number } | null>(null)
 
   // 图片预览
   const [previewImage, setPreviewImage] = useState('')
@@ -94,6 +111,9 @@ export function ChatNew() {
   const imageInputRef = useRef<HTMLInputElement>(null)
   const [pendingImage, setPendingImage] = useState<{ file: File; previewUrl: string } | null>(null)
   const pendingImageRef = useRef<{ file: File; previewUrl: string } | null>(null)
+  const [itemPickerTarget, setItemPickerTarget] = useState<{
+    accountId: string; cid: string; toUserId: string; accountLabel: string; recipientLabel: string
+  } | null>(null)
 
   // 当前客户订单与快捷短语
   const [customerOrders, setCustomerOrders] = useState<CustomerOrder[]>([])
@@ -103,6 +123,9 @@ export function ChatNew() {
   const [cancellingOrderNo, setCancellingOrderNo] = useState('')
   const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null)
   const [loadingOrderDetail, setLoadingOrderDetail] = useState(false)
+  const [identityOrder, setIdentityOrder] = useState<OrderDetail | null>(null)
+  const [loadingIdentityOrderNo, setLoadingIdentityOrderNo] = useState('')
+  const identityRequestRef = useRef(0)
   const [blacklisting, setBlacklisting] = useState(false)
   const [isOfficiallyBlocked, setIsOfficiallyBlocked] = useState(false)
   const [recallingMessageId, setRecallingMessageId] = useState('')
@@ -125,6 +148,22 @@ export function ChatNew() {
   // 手机端 Tab 切换（桌面端 md+ 仍为四栏并排，本 state 不影响桌面布局）
   type MobileTab = 'accounts' | 'convs' | 'chat' | 'tools'
   const [mobileTab, setMobileTab] = useState<MobileTab>('accounts')
+  const [foreground, setForeground] = useState(document.visibilityState === 'visible')
+  const [desktop, setDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches)
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 768px)')
+    const visibilityChanged = () => setForeground(document.visibilityState === 'visible')
+    const layoutChanged = () => setDesktop(media.matches)
+    document.addEventListener('visibilitychange', visibilityChanged)
+    media.addEventListener('change', layoutChanged)
+    return () => {
+      document.removeEventListener('visibilitychange', visibilityChanged)
+      media.removeEventListener('change', layoutChanged)
+    }
+  }, [])
+  const readVisible = location.pathname === '/online-chat-new' && foreground &&
+    (desktop || mobileTab === 'chat') && !searchingHistory &&
+    accounts.some(account => account.account_id === activeAccountId && account.connected)
 
   const requestConfirm = useCallback((options: {
     title?: string
@@ -185,6 +224,20 @@ export function ChatNew() {
   /** 每个账号每个会话的消息缓存 */
   const msgsCacheRef = useRef<Record<string, Record<string, MessageCache>>>({})
   const recoveryRef = useRef(new ChatHistoryRecovery())
+  const readState = useConversationRead({ accountId: activeAccountId, cid: activeCid,
+    messages, visible: readVisible, loading: loadingMsgs,
+    onError: message => addToast({ message, type: 'error' }) })
+  const { reconcile: reconcileRead, observe: observeReadMessage, latestLoaded, invalidate: invalidateRead,
+    recordServer, serverVersion, needsLatest } = readState
+  useEffect(() => {
+    for (const [accountId, cache] of Object.entries(convsCacheRef.current)) {
+      cache.convs = reconcileRead(accountId, cache.convs, cid => msgsCacheRef.current[accountId]?.[cid]?.msgs ?? [])
+    }
+    const accountId = activeAccountIdRef.current
+    const next = reconcileRead(accountId, conversationsRef.current, cid => msgsCacheRef.current[accountId]?.[cid]?.msgs ?? [])
+    conversationsRef.current = next
+    setConversations(next)
+  }, [readState.revision, reconcileRead])
   /** 记住每个账号上次选中的会话 */
   const activeConvPerAccountRef = useRef<Record<string, string>>({})
 
@@ -242,16 +295,19 @@ export function ChatNew() {
   }, [activeCid, activeAccountId])
 
   // ==================== WebSocket 实时推送（多账号） ====================
+  // 未打开的会话没有正文缓存，仍需按消息 ID 消除多通道回声的重复未读计数。
+  const seenMessageEventsRef = useRef(new Map<string, true>())
   /** 更新会话列表的通用逻辑（可作用于 state 数组或缓存数组） */
-  const updateConvList = (convs: Conversation[], cid: string, summary: string, msg: ChatMessage, isViewing: boolean): Conversation[] => {
+  const updateConvList = (convs: Conversation[], cid: string, summary: string, msg: ChatMessage, isDuplicate = false): Conversation[] => {
     const exists = convs.some((c) => c.cid === cid)
     if (exists) {
       const updated = convs.map((c) => {
         if (c.cid !== cid) return c
-        return { ...c, lastMessageSummary: summary, lastMessageTime: msg.time, unreadCount: isViewing ? 0 : c.unreadCount + 1 }
+        if (toTimestampMs(c.lastMessageTime) > toTimestampMs(msg.time)) return c
+        return { ...c, lastMessageSummary: summary, lastMessageTime: msg.time,
+          unreadCount: c.unreadCount + (msg.isSelf || isDuplicate ? 0 : 1) }
       })
-      const target = updated.find((c) => c.cid === cid)!
-      return [target, ...updated.filter((c) => c.cid !== cid)]
+      return updated.sort((a, b) => toTimestampMs(b.lastMessageTime) - toTimestampMs(a.lastMessageTime))
     }
     // 新会话
     const newConv: Conversation = {
@@ -260,19 +316,18 @@ export function ChatNew() {
       otherUserName: msg.isSelf ? '' : (msg.senderName || ''),
       otherUserAvatar: '', itemTitle: '',
       lastMessageSummary: summary, lastMessageTime: msg.time,
-      unreadCount: isViewing ? 0 : 1,
+      unreadCount: msg.isSelf ? 0 : 1,
     }
     return [newConv, ...convs]
   }
 
-  const handleWsNewMessage = useCallback((accountId: string, cid: string, msg: ChatMessage) => {
+  /** 推送与异步发送结果均写入所属会话；切换窗口不会改变消息的归属。 */
+  const applyMessage = useCallback((accountId: string, cid: string, msg: ChatMessage, updateSummary = true) => {
+    observeReadMessage(accountId, cid, msg)
     const summary = msg.type === 'image' ? '[图片]' : (msg.text || '').slice(0, 50)
     const isActiveAccount = accountId === activeAccountIdRef.current
     const isViewingConv = isActiveAccount && cid === activeCidRef.current
     const conversationCache = convsCacheRef.current[accountId]
-    if (conversationCache) {
-      conversationCache.convs = updateConvList(conversationCache.convs, cid, summary, msg, isViewingConv)
-    }
     let messageCache = msgsCacheRef.current[accountId]?.[cid]
     if (!messageCache && isViewingConv) {
       msgsCacheRef.current[accountId] ??= {}
@@ -280,20 +335,48 @@ export function ChatNew() {
         hasMore: historyPageRef.current.msgHasMore, cursor: msgCursorRef.current }
       msgsCacheRef.current[accountId][cid] = messageCache
     }
+    const identity = msg.messageId || msg.clientMessageId
+    const eventKey = identity ? JSON.stringify([accountId, cid, identity]) : ''
+    const isDuplicate = !!eventKey && (seenMessageEventsRef.current.has(eventKey) ||
+      !!messageCache?.msgs.some((item) => msg.messageId ? item.messageId === msg.messageId : item.clientMessageId === msg.clientMessageId))
+    if (eventKey) {
+      seenMessageEventsRef.current.set(eventKey, true)
+      if (seenMessageEventsRef.current.size > 5000) {
+        const oldest = seenMessageEventsRef.current.keys().next().value
+        if (oldest) seenMessageEventsRef.current.delete(oldest)
+      }
+    }
     // 当前账号的非当前会话也更新缓存；补偿边界保存在独立对象中。
     if (messageCache) messageCache.msgs = appendMsg(messageCache.msgs, msg)
+    if (conversationCache && updateSummary) {
+      conversationCache.convs = reconcileRead(accountId,
+        updateConvList(conversationCache.convs, cid, summary, msg, isDuplicate),
+        conversationId => msgsCacheRef.current[accountId]?.[conversationId]?.msgs ?? [])
+    }
     if (isActiveAccount) {
-      const nextConversations = conversationCache?.convs ??
-        updateConvList(conversationsRef.current, cid, summary, msg, isViewingConv)
-      conversationsRef.current = nextConversations
-      setConversations(nextConversations)
+      if (updateSummary) {
+        const nextConversations = conversationCache?.convs ??
+          updateConvList(conversationsRef.current, cid, summary, msg, isDuplicate)
+        conversationsRef.current = nextConversations
+        setConversations(nextConversations)
+      }
       if (isViewingConv && messageCache) {
         messagesRef.current = messageCache.msgs
         setMessages(messageCache.msgs)
-        window.setTimeout(() => reloadOrdersRef.current(), 900)
       }
     }
-  }, [])
+    return isDuplicate
+  }, [reconcileRead, observeReadMessage])
+
+  const handleWsNewMessage = useCallback((accountId: string, cid: string, msg: ChatMessage) => {
+    const isDuplicate = applyMessage(accountId, cid, msg)
+    if (!isDuplicate) notifySound(accountId, cid, msg)
+    if (accountId === activeAccountIdRef.current && cid === activeCidRef.current) {
+      window.setTimeout(() => {
+        if (accountId === activeAccountIdRef.current && cid === activeCidRef.current) reloadOrdersRef.current()
+      }, 900)
+    }
+  }, [applyMessage, notifySound])
 
   // WebSocket 断连时刷新账号状态，保留订阅以等待 IM 临时离线后恢复
   // （节流：最多每 5 秒刷一次，避免网络抖动时请求风暴）
@@ -332,6 +415,7 @@ export function ChatNew() {
     onNewMessage: handleWsNewMessage,
     onConnected: handleWsConnected,
     onDisconnect: handleWsDisconnect,
+    onConversationRead: readState.acknowledge,
   })
 
   // ==================== 加载账号列表（分页） ====================
@@ -477,9 +561,11 @@ export function ChatNew() {
           otherUserName: !conversation.otherUserName || isPureDigits(conversation.otherUserName)
             ? info.nick || conversation.otherUserName : conversation.otherUserName }
       })
+      recordServer(accountId, latest)
       const cached = convsCacheRef.current[accountId]
       const next: ConversationCache = {
-        convs: append || compensating ? mergeConversations(latest, cached?.convs ?? []) : latest,
+        convs: reconcileRead(accountId, mergeConversations(latest, cached?.convs ?? []),
+          cid => msgsCacheRef.current[accountId]?.[cid]?.msgs ?? []),
         hasMore: result.hasMore, cursor: result.cursor,
       }
       convsCacheRef.current[accountId] = next
@@ -507,7 +593,7 @@ export function ChatNew() {
     }).finally(() => {
       if (requestId === convRequestIdRef.current[accountId] && isActive()) setLoadingConvs(false)
     })
-  }, [addToast])
+  }, [addToast, recordServer, reconcileRead])
 
   // 用 ref 保持 accounts 最新引用，避免 effect 闭包取到旧值
   const accountsRef = useRef(accounts)
@@ -589,8 +675,9 @@ export function ChatNew() {
   }, [activeAccountId, missingInfoKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ==================== 加载聊天记录 ====================
-  const catchUpActiveConversation = useCallback(async (accountId: string, cid: string) => {
+  const catchUpActiveConversation = useCallback(async (accountId: string, cid: string, preserveScroll = false) => {
     if (accountId !== activeAccountIdRef.current || cid !== activeCidRef.current) return
+    const readVersion = serverVersion(accountId, cid)
     const requestId = ++msgRequestIdRef.current
     const generation = recoveryRef.current.generation(accountId)
     const isCurrent = () => requestId === msgRequestIdRef.current &&
@@ -611,10 +698,16 @@ export function ChatNew() {
         hasMore: result.hasMore, cursor: result.cursor }
       msgsCacheRef.current[accountId] ??= {}
       msgsCacheRef.current[accountId][cid] = next
-      if (result.complete) recoveryRef.current.messages.get(accountId)?.delete(cid)
+      if (result.complete) {
+        recoveryRef.current.messages.get(accountId)?.delete(cid)
+        latestLoaded(accountId, cid, readVersion)
+      }
       else boundary.nextCursor = result.cursor
       messagesRef.current = next.msgs
       msgCursorRef.current = next.cursor
+      if (preserveScroll && msgContainerRef.current) {
+        historyScrollRef.current = { top: msgContainerRef.current.scrollTop, height: msgContainerRef.current.scrollHeight }
+      }
       setMessages(next.msgs)
       setMsgHasMore(next.hasMore)
       setMsgCursor(next.cursor)
@@ -626,14 +719,15 @@ export function ChatNew() {
     }).finally(() => {
       if (requestId === msgRequestIdRef.current) setLoadingMsgs(false)
     })
-  }, [addToast])
+  }, [addToast, latestLoaded, serverVersion])
 
   const loadMessages = useCallback(async (accountId: string, cid: string, append = false) => {
     if (!accountId || !cid) return
     if (recoveryRef.current.message(accountId, cid)) {
-      await catchUpActiveConversation(accountId, cid)
+      await catchUpActiveConversation(accountId, cid, append)
       return
     }
+    const readVersion = serverVersion(accountId, cid)
     const requestId = ++msgRequestIdRef.current
     const generation = recoveryRef.current.generation(accountId)
     const isCurrent = () => requestId === msgRequestIdRef.current &&
@@ -650,15 +744,19 @@ export function ChatNew() {
         msgsCacheRef.current[accountId][cid] = next
         messagesRef.current = next.msgs
         msgCursorRef.current = next.cursor
+        if (append && msgContainerRef.current) {
+          historyScrollRef.current = { top: msgContainerRef.current.scrollTop, height: msgContainerRef.current.scrollHeight }
+        }
         setMessages(next.msgs)
         setMsgHasMore(next.hasMore)
         setMsgCursor(next.cursor)
+        if (!append) latestLoaded(accountId, cid, readVersion)
       }).catch((error: Error) => {
         if (isCurrent()) addToast({ message: error.message, type: 'error' })
       }).finally(() => {
         if (requestId === msgRequestIdRef.current) setLoadingMsgs(false)
       })
-  }, [addToast, catchUpActiveConversation])
+  }, [addToast, catchUpActiveConversation, latestLoaded, serverVersion])
 
   // 边界已在断线时冻结，等待会话补偿期间收到的实时消息不会推进消息补偿终点。
   const reloadCurrentChat = useCallback(async (accountId: string) => {
@@ -675,6 +773,8 @@ export function ChatNew() {
   /** 账号和会话切换共用恢复入口，后台缓存待补偿时立即拉取缺失消息。 */
   const restoreConversation = useCallback((accountId: string, cid: string) => {
     msgRequestIdRef.current += 1
+    invalidateRead()
+    historyScrollRef.current = null
     const cached = msgsCacheRef.current[accountId]?.[cid]
     const restored = cached ?? { msgs: [], hasMore: false, cursor: null }
     messagesRef.current = restored.msgs
@@ -683,10 +783,12 @@ export function ChatNew() {
     setMsgHasMore(restored.hasMore)
     setMsgCursor(restored.cursor)
     setLoadingMsgs(false)
-    if (cid && (!cached || recoveryRef.current.message(accountId, cid))) {
-      void loadMessages(accountId, cid)
+    if (cid) {
+      // 有缓存仍校验最新页，补齐漏推期间的消息，并保留已加载的历史分页边界。
+      if (cached) void catchUpActiveConversation(accountId, cid)
+      else void loadMessages(accountId, cid)
     }
-  }, [loadMessages])
+  }, [catchUpActiveConversation, loadMessages, invalidateRead])
 
   // 选中账号时恢复缓存；离线期间产生的缺口通过同一补偿入口补齐。
   useEffect(() => {
@@ -715,9 +817,6 @@ export function ChatNew() {
   const handleSelectConversation = (cid: string) => {
     selectCid(cid)
     setMobileTab('chat')
-    setConversations((prev) => prev.map((conversation) =>
-      conversation.cid === cid ? { ...conversation, unreadCount: 0 } : conversation,
-    ))
     restoreConversation(activeAccountId, cid)
   }
 
@@ -746,7 +845,59 @@ export function ChatNew() {
     setMobileTab('chat')
   }
 
+  // 保活页面、后台标签页、手机其它栏及搜索预览均不能产生已读。
+  // 每次真正进入聊天都先校验最新消息，缓存渲染本身不等于已读。
+  useEffect(() => {
+    invalidateRead()
+    if (readVisible && activeAccountId && activeCid) void catchUpActiveConversation(activeAccountId, activeCid)
+  }, [readVisible, activeAccountId, activeCid, invalidateRead, catchUpActiveConversation])
+
+  const requestedUnreadVersion = useRef(new Map<string, number>())
+  useEffect(() => {
+    if (!readVisible || loadingMsgs || loadingConvs || !activeCid) return
+    const version = serverVersion(activeAccountId, activeCid)
+    const key = JSON.stringify([activeAccountId, activeCid])
+    if (!version || !needsLatest(activeAccountId, activeCid) || requestedUnreadVersion.current.get(key) === version) return
+    requestedUnreadVersion.current.set(key, version)
+    void catchUpActiveConversation(activeAccountId, activeCid)
+  }, [readState.requiredRevision, readVisible, loadingMsgs, loadingConvs, activeAccountId, activeCid,
+    serverVersion, needsLatest, catchUpActiveConversation])
+
   const activeConversation = conversations.find((c) => c.cid === activeCid)
+
+  // 摘要已前进而正文没有跟上时自动补偿；同一摘要失败后不循环请求。
+  const reconciledSummaryRef = useRef(new Map<string, string>())
+  useEffect(() => {
+    if (!activeConversation || loadingMsgs || loadingConvs) return
+    const latestTime = messages.reduce((latest, message) => Math.max(latest, toTimestampMs(message.time)), 0)
+    if (toTimestampMs(activeConversation.lastMessageTime) <= latestTime) return
+    const key = `${activeAccountId}:${activeCid}`
+    const summary = `${activeConversation.lastMessageTime}:${activeConversation.lastMessageSummary}`
+    if (reconciledSummaryRef.current.get(key) === summary) return
+    reconciledSummaryRef.current.set(key, summary)
+    void catchUpActiveConversation(activeAccountId, activeCid)
+  }, [activeAccountId, activeCid, activeConversation, messages, loadingMsgs, loadingConvs, catchUpActiveConversation])
+
+  useEffect(() => {
+    let refreshing = false
+    let lastRefresh = 0
+    const refreshVisibleChat = () => {
+      const accountId = activeAccountIdRef.current
+      if (document.visibilityState !== 'visible' || !accountId || refreshing || Date.now() - lastRefresh < 3000) return
+      lastRefresh = Date.now()
+      refreshing = true
+      prepareAccountRecovery(accountId)
+      void reloadCurrentChat(accountId).finally(() => { refreshing = false })
+    }
+    window.addEventListener('focus', refreshVisibleChat)
+    window.addEventListener('online', refreshVisibleChat)
+    document.addEventListener('visibilitychange', refreshVisibleChat)
+    return () => {
+      window.removeEventListener('focus', refreshVisibleChat)
+      window.removeEventListener('online', refreshVisibleChat)
+      document.removeEventListener('visibilitychange', refreshVisibleChat)
+    }
+  }, [prepareAccountRecovery, reloadCurrentChat])
 
   useEffect(() => {
     let cancelled = false
@@ -763,20 +914,58 @@ export function ChatNew() {
       setCustomerOrders([])
       return
     }
+    const isCurrent = () => activeAccountId === activeAccountIdRef.current && activeCid === activeCidRef.current
     if (!silent) setLoadingOrders(true)
     try {
       const data = await getCustomerOrders(activeAccountId, activeConversation.otherUserId, activeCid)
-      setCustomerOrders(data)
+      if (isCurrent()) setCustomerOrders(data)
     } catch (e: any) {
-      addToast({ message: e.message || '获取客户订单失败', type: 'error' })
+      if (isCurrent()) addToast({ message: e.message || '获取客户订单失败', type: 'error' })
     } finally {
-      if (!silent) setLoadingOrders(false)
+      if (!silent && isCurrent()) setLoadingOrders(false)
     }
   }, [activeAccountId, activeCid, activeConversation?.otherUserId, addToast])
 
   useEffect(() => {
+    setCustomerOrders([])
     loadCustomerOrders()
   }, [loadCustomerOrders])
+
+  useEffect(() => {
+    identityRequestRef.current += 1
+    setIdentityOrder(null)
+    setLoadingIdentityOrderNo('')
+    setItemPickerTarget(null)
+  }, [activeAccountId, activeCid])
+
+  useEffect(() => {
+    if (itemPickerTarget && !accounts.some(account => account.account_id === itemPickerTarget.accountId && account.connected)) {
+      setItemPickerTarget(null)
+    }
+  }, [accounts, itemPickerTarget])
+
+  const handleIdentityInfo = async (orderNo: string) => {
+    if (!canManageIdentity || loadingIdentityOrderNo) return
+    const accountId = activeAccountId
+    const cid = activeCid
+    const requestId = ++identityRequestRef.current
+    const isCurrent = () => requestId === identityRequestRef.current &&
+      accountId === activeAccountIdRef.current && cid === activeCidRef.current
+    setLoadingIdentityOrderNo(orderNo)
+    try {
+      const result = await getOrderDetail(orderNo)
+      if (!isCurrent()) return
+      if (!result.success || !result.data?.id) throw new Error('读取订单失败，请刷新客户订单后重试')
+      if (!['pending_ship', 'shipped', 'completed'].includes(result.data.status)) {
+        throw new Error('该订单当前状态不支持配置身份信息，请刷新客户订单')
+      }
+      setIdentityOrder(result.data)
+    } catch (error) {
+      if (isCurrent()) addToast({ type: 'error', message: error instanceof Error ? error.message : '读取身份信息失败' })
+    } finally {
+      if (isCurrent()) setLoadingIdentityOrderNo('')
+    }
+  }
 
   useEffect(() => {
     reloadOrdersRef.current = () => { void loadCustomerOrders(true) }
@@ -933,6 +1122,8 @@ export function ChatNew() {
 
   const handleRecallMessage = async (msg: ChatMessage) => {
     if (!activeAccountId || !msg.messageId || recallingMessageId) return
+    const accountId = activeAccountId
+    const cid = activeCid
     if (!canRecallMessage(msg)) {
       addToast({ message: '消息发送超过两分钟，无法撤回', type: 'error' })
       return
@@ -945,11 +1136,9 @@ export function ChatNew() {
     }))) return
     setRecallingMessageId(msg.messageId)
     try {
-      const res = await recallMessage(activeAccountId, msg.messageId, msg.time)
+      const res = await recallMessage(accountId, msg.messageId, msg.time)
       if (!res.success) throw new Error(res.message || '撤回失败')
-      setMessages((prev) => prev.map((item) => item.messageId === msg.messageId
-        ? { ...item, type: 'system', text: '你撤回了一条消息', images: [] }
-        : item))
+      applyMessage(accountId, cid, { ...msg, type: 'system', text: '你撤回了一条消息', images: [] }, false)
       addToast({ message: res.message || '消息已撤回', type: 'success' })
     } catch (e: any) {
       addToast({ message: e.message || '撤回失败', type: 'error' })
@@ -962,8 +1151,12 @@ export function ChatNew() {
   useEffect(() => {
     if (!msgContainerRef.current) return
     const container = msgContainerRef.current
+    const anchor = historyScrollRef.current
+    historyScrollRef.current = null
     // 只有新增消息时才滚动（而不是加载历史）
-    if (messages.length > prevMsgCountRef.current || prevMsgCountRef.current === 0) {
+    if (anchor) {
+      container.scrollTop = anchor.top + container.scrollHeight - anchor.height
+    } else if (messages.length > prevMsgCountRef.current || prevMsgCountRef.current === 0) {
       container.scrollTop = container.scrollHeight
     }
     prevMsgCountRef.current = messages.length
@@ -972,6 +1165,9 @@ export function ChatNew() {
   // ==================== 发送消息 ====================
   const sendMessageText = async (rawText: string, clearInput = false) => {
     if (!rawText.trim() || !activeAccountId || !activeCid || sending) return
+    const accountId = activeAccountId
+    const cid = activeCid
+    const sentAt = Date.now()
 
     // 获取当前会话的对方用户ID
     const conv = conversations.find((c) => c.cid === activeCid)
@@ -983,33 +1179,27 @@ export function ChatNew() {
     const text = rawText.trim()
     setSending(true)
     try {
-      const res = await sendTextMessage(activeAccountId, activeCid, conv.otherUserId, text)
+      const res = await sendTextMessage(accountId, cid, conv.otherUserId, text)
       // 无论成功失败，都把这条消息展示在聊天记录中；
       // 失败时标记 failed + failReason，气泡前显示红色感叹号，点击查看原因
       const sentMsg: ChatMessage = {
         messageId: res.data?.messageId || '',
-        senderId: activeAccountId,
+        clientMessageId: res.data?.clientMessageId,
+        senderId: accountId,
         senderName: '',
         isSelf: true,
         type: 'text',
         text,
         images: [],
-        time: Date.now(),
+        time: res.data?.time ?? sentAt,
         failed: !res.success,
         failReason: res.success ? undefined : (res.message || '发送失败'),
       }
-      if (clearInput) setInputText('')
-      setMessages((prev) => appendMsg(prev, sentMsg))
-      if (res.success) {
-        // 成功才更新会话列表摘要
-        setConversations((prev) =>
-          prev.map((c) =>
-            c.cid === activeCid
-              ? { ...c, lastMessageSummary: text.slice(0, 50), lastMessageTime: sentMsg.time }
-              : c,
-          ),
-        )
-      } else {
+      if (clearInput && accountId === activeAccountIdRef.current && cid === activeCidRef.current) {
+        setInputText((current) => current === rawText ? '' : current)
+      }
+      applyMessage(accountId, cid, sentMsg, res.success)
+      if (!res.success) {
         addToast({ message: res.message || '发送失败', type: 'error' })
       }
     } catch (e: any) {
@@ -1017,18 +1207,20 @@ export function ChatNew() {
       const failReason = e?.message || '发送失败'
       const sentMsg: ChatMessage = {
         messageId: '',
-        senderId: activeAccountId,
+        senderId: accountId,
         senderName: '',
         isSelf: true,
         type: 'text',
         text,
         images: [],
-        time: Date.now(),
+        time: sentAt,
         failed: true,
         failReason,
       }
-      if (clearInput) setInputText('')
-      setMessages((prev) => appendMsg(prev, sentMsg))
+      if (clearInput && accountId === activeAccountIdRef.current && cid === activeCidRef.current) {
+        setInputText((current) => current === rawText ? '' : current)
+      }
+      applyMessage(accountId, cid, sentMsg, false)
       addToast({ message: failReason, type: 'error' })
     } finally {
       setSending(false)
@@ -1036,6 +1228,35 @@ export function ChatNew() {
   }
 
   // ==================== 发送图片 ====================
+  const openItemPicker = () => {
+    const account = accounts.find(item => item.account_id === activeAccountId)
+    if (sending || !account?.connected || !activeConversation?.otherUserId || !activeCid) return
+    setItemPickerTarget({ accountId: activeAccountId, cid: activeCid, toUserId: activeConversation.otherUserId,
+      accountLabel: account.display_name || account.remark || account.account_id,
+      recipientLabel: `${activeConversation.otherUserName || activeConversation.otherUserId}（${activeConversation.otherUserId}）` })
+  }
+
+  const sendItemCard = async (target: NonNullable<typeof itemPickerTarget>, item: ChatSendableItem) => {
+    if (sending) throw new Error('上一条消息正在发送，请稍后再试')
+    if (!accountsRef.current.some(account => account.account_id === target.accountId && account.connected)) {
+      throw new Error('当前账号未连接，请重新连接后发送宝贝')
+    }
+    setSending(true)
+    try {
+      const result = await sendItemMessage(target.accountId, target.cid, target.toUserId, item.itemId)
+      if (!result.success || !result.data?.message) throw new Error(result.message || '宝贝发送失败')
+      applyMessage(target.accountId, target.cid, result.data.message)
+      addToast({ type: 'success', message: '宝贝已发送' })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : '宝贝发送失败'
+      applyMessage(target.accountId, target.cid, { messageId: '', senderId: target.accountId,
+        senderName: '', isSelf: true, type: 'item', text: `[宝贝] ${item.title}`, images: [],
+        itemCard: item, time: Date.now(), failed: true, failReason: reason }, false)
+      addToast({ type: 'error', message: reason })
+      throw error
+    } finally { setSending(false) }
+  }
+
   const clearPendingImage = useCallback(() => {
     setPendingImage((prev) => {
       if (prev) URL.revokeObjectURL(prev.previewUrl)
@@ -1084,6 +1305,9 @@ export function ChatNew() {
 
   const sendImageFile = async (file: File) => {
     if (!file || !activeAccountId || !activeCid || sending) return false
+    const accountId = activeAccountId
+    const cid = activeCid
+    const sentAt = Date.now()
 
     if (!validateImageFile(file)) return false
 
@@ -1095,32 +1319,25 @@ export function ChatNew() {
 
     setSending(true)
     try {
-      const res = await sendImageMessage(activeAccountId, activeCid, conv.otherUserId, file)
+      const res = await sendImageMessage(accountId, cid, conv.otherUserId, file)
       // 成功用CDN地址；失败则用本地预览地址，保证用户都能看到所发图片
       const displayUrl = res.success && res.data?.imageUrl ? res.data.imageUrl : URL.createObjectURL(file)
       // 无论成功失败，都把这条图片消息展示在聊天记录中
       const sentMsg: ChatMessage = {
         messageId: res.data?.messageId || '',
-        senderId: activeAccountId,
+        clientMessageId: res.data?.clientMessageId,
+        senderId: accountId,
         senderName: '',
         isSelf: true,
         type: 'image',
         text: '',
         images: [displayUrl],
-        time: Date.now(),
+        time: res.data?.time ?? sentAt,
         failed: !res.success,
         failReason: res.success ? undefined : (res.message || '发送失败'),
       }
-      setMessages((prev) => appendMsg(prev, sentMsg))
-      if (res.success) {
-        setConversations((prev) =>
-          prev.map((c) =>
-            c.cid === activeCid
-              ? { ...c, lastMessageSummary: '[图片]', lastMessageTime: sentMsg.time }
-              : c,
-          ),
-        )
-      } else {
+      applyMessage(accountId, cid, sentMsg, res.success)
+      if (!res.success) {
         addToast({ message: res.message || '发送失败', type: 'error' })
       }
       return res.success
@@ -1129,17 +1346,17 @@ export function ChatNew() {
       const displayUrl = URL.createObjectURL(file)
       const sentMsg: ChatMessage = {
         messageId: '',
-        senderId: activeAccountId,
+        senderId: accountId,
         senderName: '',
         isSelf: true,
         type: 'image',
         text: '',
         images: [displayUrl],
-        time: Date.now(),
+        time: sentAt,
         failed: true,
         failReason,
       }
-      setMessages((prev) => appendMsg(prev, sentMsg))
+      applyMessage(accountId, cid, sentMsg, false)
       addToast({ message: failReason, type: 'error' })
       return false
     } finally {
@@ -1247,16 +1464,33 @@ export function ChatNew() {
 
       <div className="flex flex-1 min-h-0 flex-col md:flex-row gap-3">
       {/* 左侧：账号列表 */}
-      <div className={`${mobileTab === 'accounts' ? 'flex' : 'hidden'} md:flex w-full md:w-56 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-col min-h-0`}>
+      <div id="chat-account-list" className={`${mobileTab === 'accounts' ? 'flex' : 'hidden'} ${accountsCollapsed ? 'md:hidden' : 'md:flex'} w-full md:w-56 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-col min-h-0`}>
         <div className="p-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
           <span className="font-medium text-sm text-gray-700 dark:text-gray-300">账号列表</span>
-          <button
-            onClick={() => loadAccounts()}
-            className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
-            title="刷新"
-          >
-            <RefreshCw className={`w-4 h-4 text-gray-500 ${loadingAccounts ? 'animate-spin' : ''}`} />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              ref={collapseAccountsRef}
+              type="button"
+              onClick={() => {
+                setAccountsCollapsed(true)
+                window.requestAnimationFrame(() => expandAccountsRef.current?.focus())
+              }}
+              className="hidden md:inline-flex p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-gray-500"
+              title="收起账号列表"
+              aria-label="收起账号列表"
+              aria-expanded={!accountsCollapsed}
+              aria-controls="chat-account-list"
+            >
+              <PanelLeftClose className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => loadAccounts()}
+              className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+              title="刷新"
+            >
+              <RefreshCw className={`w-4 h-4 text-gray-500 ${loadingAccounts ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
         </div>
         <div
           ref={accountListRef}
@@ -1358,10 +1592,31 @@ export function ChatNew() {
       {/* 中间：会话列表 */}
       <div className={`${mobileTab === 'convs' ? 'flex' : 'hidden'} md:flex w-full md:w-72 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-col min-h-0`}>
         <div className="p-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-          <span className="font-medium text-sm text-gray-700 dark:text-gray-300">会话列表</span>
+          <div className="flex items-center gap-2">
+            {accountsCollapsed && (
+              <button
+                ref={expandAccountsRef}
+                type="button"
+                onClick={() => {
+                  setAccountsCollapsed(false)
+                  window.requestAnimationFrame(() => collapseAccountsRef.current?.focus())
+                }}
+                className="hidden md:inline-flex items-center gap-1 p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-gray-500"
+                title="展开账号列表"
+                aria-label="展开账号列表"
+                aria-expanded={false}
+                aria-controls="chat-account-list"
+              >
+                <PanelLeftOpen className="w-4 h-4" />
+                <span className="text-xs">账号</span>
+              </button>
+            )}
+            <span className="font-medium text-sm text-gray-700 dark:text-gray-300">会话列表</span>
+          </div>
           {activeAccountId && (
             <button
-              onClick={() => { setConvCursor(null); loadConversations(activeAccountId) }}
+              onClick={() => { prepareAccountRecovery(activeAccountId); void reloadCurrentChat(activeAccountId) }}
+              disabled={loadingConvs}
               className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
               title="刷新会话"
             >
@@ -1501,7 +1756,7 @@ export function ChatNew() {
               )}
               {messages.map((msg, idx) => (
                 <div
-                  key={msg.messageId || idx}
+                  key={msg.messageId || msg.clientMessageId || idx}
                   className={`flex ${msg.isSelf ? 'justify-end' : 'justify-start'}`}
                 >
                   <div className={`max-w-[70%] ${msg.isSelf ? 'order-1' : ''}`}>
@@ -1521,9 +1776,9 @@ export function ChatNew() {
                           msg.isSelf
                             ? 'bg-blue-500 text-white'
                             : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200'
-                        } ${msg.type === 'system' ? '!bg-gray-200 dark:!bg-gray-600 text-center text-gray-500 dark:text-gray-400 text-xs' : ''}`}
+                        } ${msg.type === 'system' ? '!bg-gray-200 dark:!bg-gray-600 text-center text-gray-500 dark:text-gray-400 text-xs' : ''} ${msg.type === 'item' && msg.itemCard ? '!bg-transparent !p-0' : ''}`}
                       >
-                        {msg.type === 'image' && msg.images.length > 0 ? (
+                        {msg.type === 'item' && msg.itemCard ? <ItemCardMessage card={msg.itemCard} /> : msg.type === 'image' && msg.images.length > 0 ? (
                           <div className="space-y-1">
                             {msg.images.map((url, i) => (
                               <img
@@ -1612,6 +1867,14 @@ export function ChatNew() {
               >
                 <ImagePlus className="w-4 h-4" />
               </button>
+              <button
+                type="button"
+                onClick={openItemPicker}
+                disabled={sending || !activeCid || !activeConversation?.otherUserId || !accounts.find(account => account.account_id === activeAccountId)?.connected}
+                title="发送宝贝"
+                aria-label="发送宝贝"
+                className="flex h-9 w-9 shrink-0 items-center justify-center gap-1 rounded-lg border border-gray-300 text-xs text-gray-500 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700 sm:w-auto sm:px-2"
+              ><Package className="h-4 w-4" /><span className="hidden sm:inline">发送宝贝</span></button>
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
@@ -1657,8 +1920,10 @@ export function ChatNew() {
           confirmingOrderNo={confirmingOrderNo}
           cancellingOrderNo={cancellingOrderNo}
           loadingOrderDetail={loadingOrderDetail}
+          loadingIdentityOrderNo={loadingIdentityOrderNo}
           onSync={handleSyncOrders}
           onViewDetail={handleViewOrderDetail}
+          onIdentityInfo={canManageIdentity ? handleIdentityInfo : undefined}
           onCancel={handleCancelOrder}
           onNoLogistics={handleNoLogisticsDelivery}
           onDeliver={handleDeliverOrder}
@@ -1681,6 +1946,24 @@ export function ChatNew() {
         />
       </div>
       </div>
+      {itemPickerTarget && (
+        <ItemPickerModal
+          key={`${itemPickerTarget.accountId}:${itemPickerTarget.cid}`}
+          accountId={itemPickerTarget.accountId}
+          accountLabel={itemPickerTarget.accountLabel}
+          recipientLabel={itemPickerTarget.recipientLabel}
+          onClose={() => setItemPickerTarget(null)}
+          onSend={item => sendItemCard(itemPickerTarget, item)}
+        />
+      )}
+      {identityOrder && canManageIdentity && (
+        <TicketRegistrationModal
+          key={identityOrder.id}
+          order={identityOrder}
+          onClose={() => setIdentityOrder(null)}
+          onSaved={() => { void loadCustomerOrders(true) }}
+        />
+      )}
       <OrderDetailModal
         order={orderDetail}
         fallbackBuyerNick={activeConversation?.otherUserName}

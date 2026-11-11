@@ -3,10 +3,16 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 TicketCollectionStatus = Literal["uncreated", "pending", "collected"]
 TicketExportStatus = Literal["unexported", "exported"]
+
+
+class OrderRemarkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    remark: StrictStr = Field(max_length=10000)
 
 
 class OrderOut(BaseModel):
@@ -22,6 +28,7 @@ class OrderOut(BaseModel):
     quantity: int
     amount: str
     status: str
+    remark: str = ""
     is_bargain: bool = False  # 是否小刀
     is_rated: bool = False  # 是否已评价
     is_red_flower: bool = False  # 是否已求小红花

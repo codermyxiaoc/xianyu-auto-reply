@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { AlertCircle, CalendarDays, Check, Copy, ExternalLink, Eye, EyeOff, Loader2, Plus, RefreshCw, Save, Send, Ticket, Trash2, Users, X } from 'lucide-react'
+import { AlertCircle, CalendarDays, Check, Copy, ExternalLink, Eye, EyeOff, Loader2, Plus, RefreshCw, Save, Send, Table2, Ticket, Trash2, Users, X } from 'lucide-react'
 import {
   getTicketOrderConfiguration,
   getTicketTypes,
@@ -12,6 +12,7 @@ import {
   type TicketVisitorCategory,
 } from '@/api/ticketRegistration'
 import { ConfirmModal } from '@/components/common/ConfirmModal'
+import { TicketTablePreview } from './TicketTablePreview'
 import { NativeSelect } from '@/components/common/NativeSelect'
 import { useUIStore } from '@/store/uiStore'
 import { copyToClipboard } from '@/utils/clipboard'
@@ -79,8 +80,13 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
   const [expanded, setExpanded] = useState(false)
   const [visitDate, setVisitDate] = useState('')
   const [visitors, setVisitors] = useState<VisitorDraft[]>([])
-  const [busy, setBusy] = useState<'save' | 'send' | 'recollect' | null>(null)
+  const [busy, setBusy] = useState<'save' | 'send' | 'recollect' | 'preview' | null>(null)
   const recollectInFlight = useRef(false)
+  const previewInFlight = useRef(false)
+  const previewButtonRef = useRef<HTMLButtonElement>(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const previewRef = useRef(false)
+  const wasPreviewOpen = useRef(false)
   const [revealed, setRevealed] = useState<Set<string>>(new Set())
   const [phoneRevealed, setPhoneRevealed] = useState(false)
   const [discardAction, setDiscardAction] = useState<'close' | 'reload' | 'recollect' | null>(null)
@@ -88,6 +94,8 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
   discardRef.current = discardAction
   const configuration = view?.configuration
   const submitted = configuration?.status === 'submitted'
+  const previewVisible = previewOpen && submitted && !loading && !loadError && !busy && !discardAction
+  previewRef.current = !!previewVisible
   const editable = !!view?.configurable && !submitted && !busy
   const dirty = configuration
     ? comparable(visitDate, visitors) !== comparable(configuration.visit_date, configuration.visitors)
@@ -97,6 +105,7 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
   const total = visitors.reduce((sum, visitor) => sum + (Number.isFinite(Number(visitor.amount)) ? Math.round(Number(visitor.amount) * 100) : 0), 0) / 100
 
   function applyView(next: TicketOrderConfiguration) {
+    setPreviewOpen(false)
     setView(next)
     setVisitDate(next.configuration?.visit_date || '')
     setVisitors((next.configuration?.visitors || []).map(visitor => ({
@@ -111,6 +120,7 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
     if (!order) return
     const current = ++sequence.current
     setLoading(true)
+    setPreviewOpen(false)
     setLoadError('')
     setActionError('')
     setView(null)
@@ -142,7 +152,7 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
 
   const closeRef = useRef(() => {})
   closeRef.current = () => {
-    if (busy) return
+    if (busy && busy !== 'preview') return
     if (dirty) setDiscardAction('close')
     else onClose()
   }
@@ -156,6 +166,7 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
+        if (previewRef.current) { setPreviewOpen(false); return }
         if (recollectInFlight.current) return
         if (discardRef.current) setDiscardAction(null)
         else closeRef.current()
@@ -190,6 +201,12 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
       else modalRef.current?.focus()
     }
   }, [discardAction])
+
+  useEffect(() => {
+    if (previewVisible) modalRef.current?.focus()
+    else if (wasPreviewOpen.current) previewButtonRef.current?.focus()
+    wasPreviewOpen.current = !!previewVisible
+  }, [previewVisible])
 
   if (!order) return null
 
@@ -286,6 +303,44 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
     }
   }
 
+  async function openTablePreview() {
+    if (!order || !submitted || busy || discardRef.current || previewInFlight.current || recollectInFlight.current) return
+    const current = sequence.current
+    previewInFlight.current = true
+    setBusy('preview')
+    setActionError('')
+    try {
+      // 只读回读，避免其他管理员已重新收集时继续展示旧实名信息。
+      const result = await getTicketOrderConfiguration(order.id)
+      if (sequence.current !== current) return
+      if (!result.success || !result.data) throw new Error(result.message || '读取表格预览失败，请重试')
+      if (result.data.order_id !== order.id) throw new Error('订单信息不匹配，请重新读取门票信息')
+      applyView(result.data)
+      if (result.data.configuration?.status !== 'submitted') {
+        setActionError('当前订单暂无已收集的身份信息，请等待买家提交')
+      } else if (!result.data.configuration.visitors.length) {
+        setActionError('暂无可预览的出行人信息')
+      } else {
+        setPreviewOpen(true)
+      }
+    } catch (error) {
+      if (sequence.current === current) {
+        // 回读失败（包括权限变更）时丢弃旧实名数据，只允许重新加载。
+        setPreviewOpen(false)
+        setView(null)
+        setVisitors([])
+        setVisitDate('')
+        setExpanded(false)
+        setRevealed(new Set())
+        setPhoneRevealed(false)
+        setLoadError(error instanceof Error ? error.message : '读取表格预览失败，请重试')
+      }
+    } finally {
+      previewInFlight.current = false
+      if (sequence.current === current) setBusy(null)
+    }
+  }
+
   async function copyLink() {
     if (!linkUsable) return
     const ok = await copyToClipboard(link)
@@ -300,7 +355,12 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/50 p-3 backdrop-blur-sm sm:p-6">
       <div ref={modalRef} role="dialog" aria-modal="true" aria-hidden={!!discardAction} aria-labelledby={titleId} tabIndex={-1}
-        className="flex max-h-[92dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl outline-none dark:bg-slate-900">
+        className={`flex max-h-[92dvh] w-full ${previewVisible ? 'max-w-4xl' : 'max-w-2xl'} flex-col overflow-hidden rounded-2xl bg-white shadow-2xl outline-none dark:bg-slate-900`}>
+        {previewVisible && configuration ? (
+          <TicketTablePreview titleId={titleId} orderNo={view?.order_no || order.order_id} visitDate={configuration.visit_date}
+            phone={configuration.phone} visitors={configuration.visitors.map(({ id, name, id_number, ticket_type_name, amount }) => ({ id, name, id_number, ticket_type_name, amount }))}
+            onBack={() => setPreviewOpen(false)} />
+        ) : <>
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800 sm:px-6">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-950 dark:text-blue-300"><Ticket className="h-5 w-5" /></div>
@@ -308,7 +368,7 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
           </div>
           <div className="flex items-center gap-1">
             <button type="button" onClick={requestReload} disabled={loading || !!busy} aria-label="重新读取门票信息" title="重新读取门票信息" className="modal-close disabled:opacity-40"><RefreshCw className="h-4 w-4" /></button>
-            <button type="button" onClick={() => closeRef.current()} disabled={!!busy} aria-label="关闭门票信息" className="modal-close disabled:opacity-40"><X className="h-5 w-5" /></button>
+            <button type="button" onClick={() => closeRef.current()} disabled={!!busy && busy !== 'preview'} aria-label="关闭门票信息" className="modal-close disabled:opacity-40"><X className="h-5 w-5" /></button>
           </div>
         </div>
 
@@ -384,7 +444,7 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
                     <div className="flex items-center justify-between gap-2"><h3 className="text-xs font-medium text-slate-500">联系电话</h3>{configuration?.phone && <button type="button" aria-label={phoneRevealed ? '隐藏联系电话' : '查看完整联系电话'} onClick={() => setPhoneRevealed(value => !value)} className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-300">{phoneRevealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}{phoneRevealed ? '隐藏' : '查看完整号码'}</button>}</div>
                     <p className="mt-2 font-mono text-sm text-slate-700 dark:text-slate-200">{configuration?.phone ? phoneRevealed ? configuration.phone : `${configuration.phone.slice(0, 3)}****${configuration.phone.slice(-4)}` : '等待买家填写'}</p>
                   </section>
-                  {!submitted && <p className="text-xs leading-5 text-slate-400">日期、人数、金额和票种由管理员设置。保存后，买家通过专属链接填写每位出行人的姓名、身份证及本订单的联系电话。</p>}
+                  {!submitted && <p className="text-xs leading-5 text-slate-400">在此设置日期、人数、金额和票种。保存后，买家通过专属链接填写每位出行人的姓名、身份证及本订单的联系电话。</p>}
                 </>
               )}
 
@@ -406,10 +466,12 @@ export function TicketRegistrationModal({ order, onClose, onSaved }: Props) {
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-slate-100 bg-slate-50/80 px-5 py-4 dark:border-slate-800 dark:bg-slate-800/50 sm:px-6">
           {dirty && <span className="mr-auto text-xs text-amber-600 dark:text-amber-400">有未保存的修改</span>}
           {expanded && !submitted && !loading && !loadError && <button type="button" onClick={save} disabled={!editable || (!!configuration && !dirty)} className="btn-ios-secondary inline-flex items-center gap-2 disabled:opacity-40">{busy === 'save' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{busy === 'save' ? '保存中…' : configuration ? '保存修改' : '保存并生成链接'}</button>}
+          {submitted && !loading && !loadError && <button ref={previewButtonRef} type="button" onClick={() => { void openTablePreview() }} disabled={!!busy} className="btn-ios-secondary inline-flex items-center gap-2 disabled:opacity-40">{busy === 'preview' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Table2 className="h-4 w-4" />}{busy === 'preview' ? '正在读取…' : '表格预览'}</button>}
           {submitted && !loading && !loadError && <button type="button" onClick={() => { setActionError(''); setDiscardAction('recollect') }} disabled={!view?.configurable || !!busy} className="btn-ios-secondary inline-flex items-center gap-2 disabled:opacity-40"><RefreshCw className="h-4 w-4" />重新收集</button>}
           <button type="button" onClick={send} disabled={loading || !!loadError || !!sendDisabledReason || !!busy} title={sendDisabledReason || undefined}
             className="btn-ios-primary inline-flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-40">{busy === 'send' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}{busy === 'send' ? '正在发送…' : '发送给买家'}</button>
         </div>
+        </>}
       </div>
       <div ref={confirmRef} className={discardAction ? 'fixed inset-0 z-[200]' : undefined} role={discardAction ? 'alertdialog' : undefined} aria-modal={discardAction ? true : undefined} aria-label={discardAction ? discardAction === 'recollect' ? '确认重新收集身份信息' : '确认放弃未保存的门票修改' : undefined}>
         <ConfirmModal
